@@ -13,7 +13,7 @@
     "test:unit": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint:content": "node --test tests/content.test.js",
-    "deploy": "npm run build && wrangler deploy"
+    "deploy": "npm run build && wrangler deploy --config wrangler.jsonc"
   },
   "dependencies": {
     "@astrojs/mdx": "^8.0.0",
