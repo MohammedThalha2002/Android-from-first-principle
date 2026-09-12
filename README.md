@@ -2,7 +2,7 @@
 
 Open-source Android courses, explained one layer below the API.
 
-> **Live site:** _add the deployed URL here after the first deploy._
+> **Live site:** https://blogs.mabuilds.in
 
 Most Android material teaches the API. You learn `ViewModel`, you learn
 `WorkManager`, and then something happens that no API page explains: a value is
@@ -83,6 +83,10 @@ npm run typecheck
 
 `npm run build` reads `SITE_URL` for canonical links and the sitemap, and falls
 back to localhost. Set it in your deploy environment.
+
+To deploy the static output to Cloudflare, set `SITE_URL` and run
+`npm run deploy`. Wrangler uploads `dist/` as static assets; no Cloudflare
+runtime adapter is needed.
 
 ## Contributing
 
