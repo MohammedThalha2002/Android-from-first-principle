@@ -1,0 +1,80 @@
+---
+/**
+ * An aside inside a chapter: a note, a gotcha, a "do this", a "never do this".
+ *
+ * Built on the tint vocabulary rather than its own colours. A tint is a
+ * SURFACE, so the body text takes the paired --tint-*-ink; the old version
+ * set `color` on the whole aside from a semantic token, which tinted the
+ * prose itself and made a long callout hard to read.
+ *
+ * Each kind carries an icon as well as a colour: colour alone is not a
+ * signal for a reader who cannot distinguish it.
+ */
+type Kind = 'note' | 'good' | 'warn' | 'danger';
+
+interface Props {
+  /** note (blue) · good (green) · warn (amber) · danger (coral) */
+  kind?: Kind;
+  /** Older name for the same thing, kept so existing chapters keep working. */
+  type?: 'info' | 'ok' | 'warn' | 'err';
+  title?: string;
+}
+
+const LEGACY: Record<string, Kind> = { info: 'note', ok: 'good', warn: 'warn', err: 'danger' };
+const TINT: Record<Kind, string> = { note: 'blue', good: 'green', warn: 'amber', danger: 'coral' };
+const DEFAULT_TITLE: Record<Kind, string> = { note: 'Note', good: 'Do this', warn: 'Watch out', danger: 'Never do this' };
+
+const { kind, type, title } = Astro.props;
+const resolved: Kind = kind ?? (type ? LEGACY[type] : 'note');
+const heading = title ?? DEFAULT_TITLE[resolved];
+---
+
+<aside class="callout" data-tint={TINT[resolved]} data-kind={resolved}>
+  <p class="callout-head">
+    <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      {resolved === 'good' && <path d="M4 10.5 8 14.5 16 6" />}
+      {resolved === 'note' && <><circle cx="10" cy="10" r="7.5" /><path d="M10 9v5M10 6.2v.1" /></>}
+      {resolved === 'warn' && <><path d="M10 2.8 18.2 17H1.8L10 2.8Z" /><path d="M10 8v3.6M10 14.2v.1" /></>}
+      {resolved === 'danger' && <><circle cx="10" cy="10" r="7.5" /><path d="M7 7l6 6M13 7l-6 6" /></>}
+    </svg>
+    {heading}
+  </p>
+  <div class="callout-body"><slot /></div>
+</aside>
+
+<style>
+  .callout {
+    border-radius: var(--radius-lg);
+    margin: var(--space-5) 0;
+    padding: var(--space-4) var(--space-5);
+  }
+
+  .callout-head {
+    align-items: center;
+    display: flex;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-bold);
+    gap: var(--space-2);
+    letter-spacing: var(--tracking-caps);
+    text-transform: uppercase;
+  }
+  .callout-head svg { flex: none; }
+
+  /* The body inherits the tint's ink from the aside, so prose inside a
+     callout stays readable on the tinted ground in both themes. */
+  .callout-body {
+    font-size: var(--text-base);
+    line-height: var(--leading-read);
+    margin-top: var(--space-2);
+  }
+  .callout-body :global(> * + *) { margin-top: var(--space-3); }
+  .callout-body :global(p),
+  .callout-body :global(li) { color: inherit; }
+  .callout-body :global(a) { color: inherit; text-decoration: underline; text-underline-offset: 0.16em; }
+  .callout-body :global(code) {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    border: 0;
+    color: inherit;
+  }
+  .callout-body :global(:last-child) { margin-bottom: 0; }
+</style>

@@ -1,0 +1,109 @@
+---
+import type { CollectionEntry } from 'astro:content';
+import Base from './Base.astro';
+import SectionList from '../components/SectionList.astro';
+import Chip from '../components/Chip.astro';
+import { getGroup, splitPostId } from '../data/groups';
+import { getSubtopic } from '../data/subtopics';
+
+interface Heading { depth: number; slug: string; text: string; }
+
+interface Props {
+  post: CollectionEntry<'posts'>;
+  posts: CollectionEntry<'posts'>[];
+  headings: Heading[];
+  Content: any;
+  components?: Record<string, unknown>;
+}
+
+const { post, posts, headings, Content, components = {} } = Astro.props;
+const { group: groupId } = splitPostId(post.id);
+const group = groupId ? getGroup(groupId) : null;
+const subtopic = post.data.subtopic ? getSubtopic(post.data.subtopic) : null;
+
+// The post's own h2s are the trackable sections, the left rail and the
+// in-page navigation — one list, derived once.
+const sections = headings
+  .filter((heading) => heading.depth === 2)
+  .map((heading) => ({ id: heading.slug, title: heading.text }));
+
+// Prev/next are scoped to the subtopic — an ordered read — not the whole
+// group, which may hold several subtopics plus standalone posts.
+const siblings = post.data.subtopic
+  ? posts
+      .filter((item) => item.data.subtopic === post.data.subtopic)
+      .sort((a, b) => (a.data.subtopicOrder ?? 0) - (b.data.subtopicOrder ?? 0))
+  : [];
+const index = siblings.findIndex((item) => item.id === post.id);
+const previous = index > 0 ? siblings[index - 1] : null;
+const next = index >= 0 && index < siblings.length - 1 ? siblings[index + 1] : null;
+
+const kicker = subtopic ? `${subtopic.title}${post.data.subtopicOrder ? ` · Chapter ${post.data.subtopicOrder}` : ''}` : group?.title;
+---
+
+<Base title={post.data.title} description={post.data.summary} group={groupId ?? undefined} nav="group">
+  <div class="page">
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/">Home</a><span aria-hidden="true">/</span>
+      {group && <a href={`/${group.id}/`}>{group.title}</a>}<span aria-hidden="true">/</span>
+      <span aria-current="page">{post.data.title}</span>
+    </nav>
+
+    <div class="post-grid">
+      <SectionList sections={sections} />
+
+      <article class="post-main">
+        <header class="card">
+          <div class="card-head" data-tint="accent">
+            <span>{kicker}</span>
+            <span class="num">{post.data.readingTime}</span>
+          </div>
+          <div class="card-body">
+            <h1 class="post-title">{post.data.title}</h1>
+            <p class="post-summary">{post.data.summary}</p>
+            <div class="post-chips">
+              <Chip tint="grey">{sections.length} sections</Chip>
+              {post.data.labModule && <Chip tint="blue">Lab · {post.data.labModule}</Chip>}
+              {post.data.verifiedAgainst && <Chip tint="grey">{post.data.verifiedAgainst}</Chip>}
+              {post.data.stage === 'outline' && <Chip status="new">Outline</Chip>}
+              {post.data.stage === 'draft' && <Chip tint="amber">Draft</Chip>}
+              {post.data.tags.map((tag) => <Chip tint="grey">{tag}</Chip>)}
+            </div>
+            {post.data.stage === 'outline' && (
+              <p class="outline-note">This post is an outline. Its sections are already in place; prose, diagrams and the lab mature in place.</p>
+            )}
+            {post.data.stage === 'draft' && (
+              <p class="outline-note">The prose and diagrams are written. The lab module is not built yet, so the code here has not been compiled by CI — treat snippets as illustrative until this post reaches <em>published</em>.</p>
+            )}
+          </div>
+        </header>
+
+        <div class="card reading"><div class="prose"><Content components={components} /></div></div>
+
+        <footer class="post-footer">
+          {previous
+            ? <a class="btn btn-ghost" href={`/${previous.id}/`}>← {previous.data.navTitle ?? previous.data.title}</a>
+            : group ? <a class="btn btn-ghost" href={`/${group.id}/`}>← All posts</a> : <span />}
+          {next
+            ? <a class="btn" href={`/${next.id}/`}>{next.data.navTitle ?? next.data.title} →</a>
+            : group ? <a class="btn" href={`/${group.id}/`}>Back to {group.title} →</a> : <span />}
+        </footer>
+      </article>
+    </div>
+  </div>
+</Base>
+
+<style>
+  /* Two columns: the post's sections, then the post. */
+  .post-grid { display: grid; gap: var(--space-4); grid-template-columns: minmax(0, 1fr); align-items: start; }
+  @media (min-width: 1000px) { .post-grid { grid-template-columns: var(--section-list) minmax(0, 1fr); } }
+
+  .post-main { display: grid; gap: var(--space-4); min-width: 0; }
+  .post-title { font-size: var(--text-3xl); margin: var(--space-1) 0 var(--space-3); }
+  .post-summary { color: var(--ink-2); font-size: var(--text-read); line-height: var(--leading-read); max-width: var(--measure); }
+  .post-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
+  .outline-note { color: var(--ink-3); font-size: var(--text-sm); margin-top: var(--space-4); max-width: var(--measure); }
+
+
+  .post-footer { display: flex; flex-wrap: wrap; gap: var(--space-3); justify-content: space-between; }
+</style>

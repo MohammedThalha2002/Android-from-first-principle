@@ -1,0 +1,346 @@
+---
+title: "The View Framework"
+navTitle: "Views"
+summary: "What calls onMeasure, why requestLayout is expensive, how RecyclerView reuses, and how a legacy screen hosts Compose."
+readingTime: "4 hours"
+minutes: 200
+tags: ["measure","layout","draw","measurespec","invalidate","requestlayout","rendernode","renderthread","surfaceflinger","overdraw","vsync","triple buffering","windowinsets","edge-to-edge","surfaceview","gfxinfo","jankstats","baseline profile","view","viewgroup"]
+draft: true
+date: "2026-05-23"
+subtopic: "android-internals"
+subtopicOrder: 8
+part: "II"
+verifiedAgainst: "compileSdk 36 · AGP 8.13 · Kotlin 2.3"
+stage: "outline"
+labModule: ":ch08-views"
+sources: ["06-rendering-pipeline#The traversal","06-rendering-pipeline#`MeasureSpec`","06-rendering-pipeline#Invalidation","06-rendering-pipeline#Windows, surfaces &amp; insets","06-rendering-pipeline#Failure modes","06-rendering-pipeline#Cheat-sheet","07-views-and-xml#The View hierarchy","07-views-and-xml#ConstraintLayout as a flat-hierarchy tool","07-views-and-xml#RecyclerView internals","07-views-and-xml#Custom views","07-views-and-xml#Binding &amp; the death of `findViewById`","07-views-and-xml#Interop with Compose","07-views-and-xml#Failure modes","07-views-and-xml#Cheat-sheet","09-design-systems-theming-and-accessibility#Insets &amp; edge-to-edge"]
+---
+Compose is the right choice for new UI, and this chapter is not an argument against it. It exists because **most production Android is still Views**, and the job you take will more likely involve maintaining a large XML codebase than starting a green-field Compose one.
+
+Kept short and practical, with the Compose equivalent alongside each idea — partly for translation, partly because seeing the same problem solved twice explains why the second solution exists.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## The traversal
+
+Rendering a frame walks the view tree three times, in order, and each pass has a different job.
+
+**Measure** asks every view how big it wants to be, given constraints from its parent. **Layout** assigns each view a position and final size. **Draw** records the drawing commands. Only after all three does anything reach the screen.
+
+The cost that surprises people is that **measure can run your children more than once**. A parent that cannot decide a child's size in one attempt measures it, looks at the result, and measures again with different constraints. `RelativeLayout` does this by construction. A `LinearLayout` with weights measures twice. And a `MATCH_PARENT` child inside a `WRAP_CONTENT` parent is a genuine contradiction — the parent's size depends on the child's, and the child's depends on the parent's — resolved by measuring twice.
+
+Nest those and it multiplies. Three levels of double-measuring is eight measure passes per view, which is where the old advice to keep hierarchies flat comes from. It was never about the number of objects; it was about the exponent.
+
+## `MeasureSpec`
+
+The measure pass is a **two-way negotiation**, and `MeasureSpec` is its vocabulary. A parent packs a mode and a size into a single int and hands it down; the child replies with the size it wants.
+
+| Mode | The parent is saying | Comes from |
+|---|---|---|
+| `EXACTLY` | you will be this size | `match_parent`, a fixed dp |
+| `AT_MOST` | you may be up to this size | `wrap_content` |
+| `UNSPECIFIED` | tell me what you want, no limit | a scrolling parent measuring a child |
+
+`UNSPECIFIED` is where custom views break. A `RecyclerView` measuring an item vertically passes `UNSPECIFIED` for height, and a custom view that treats that size as a real bound will compute a height of zero and vanish. The rule for `onMeasure` is to handle all three modes explicitly and always finish by calling `setMeasuredDimension`.
+
+## Invalidation
+
+Two methods, wildly different costs, and choosing wrong is a common cause of scroll jank.
+
+**`invalidate()`** says "my appearance changed". It schedules a **draw** pass for that view. Cheap — the layout is untouched.
+
+**`requestLayout()`** says "my size might have changed". That cannot be answered locally, so it walks **up to the root** and schedules a full measure and layout pass for the whole tree.
+
+```kotlin
+// Colour change: nothing moved.
+fun setHighlighted(on: Boolean) { highlighted = on; invalidate() }
+
+// Text change: the view may need to be wider, so the whole tree re-measures.
+fun setLabel(value: String) { label = value; requestLayout(); invalidate() }
+```
+
+In a scrolling list this is the difference between smooth and not. A `requestLayout` from a bind callback triggers measure and layout for everything on screen, every frame, while the finger is moving. Many framework setters call `requestLayout` internally — `setText` does — which is why changing text during a scroll is more expensive than it looks.
+
+## Windows, surfaces &amp; insets
+
+A **window** is the unit SurfaceFlinger composites — not a View. Your Activity has one; a dialog gets another; the status bar and navigation bar are windows owned by the system.
+
+Because system bars are separate windows drawn over yours, your content can be underneath them. **Insets** describe those overlaps. `WindowInsets` reports several kinds — system bars, the IME, display cutouts — and Compose exposes them as `safeDrawing` (avoid anything drawn over) and `safeContent` (also avoid gesture areas).
+
+Android 15 <ApiLevel changedIn="35" /> **enforces edge-to-edge** for apps targeting it: your content draws behind the bars whether you asked or not, so unhandled insets become clipped content rather than a stylistic choice. The fix is to consume insets at the right level, which chapter 19 covers with the rest of adaptive layout.
+
+Three surface types, for when the normal path is not enough:
+
+- **`SurfaceView`** — its own surface, composited independently, so video or a game renders without going through your view hierarchy. It does not transform or animate with the rest of the UI.
+- **`TextureView`** — behaves like a normal view (transforms, alpha) at the cost of an extra copy through the GPU.
+- **`SurfaceControl`** — direct control over a surface, for advanced cases.
+
+## Failure modes: Rendering pipeline
+
+**A list stutters on first scroll and never again.** *Symptom:* jank on the first pass through a screen. *Cause:* cold shader compilation. *Fix:* ship a Baseline Profile (ch. 11); confirm by scrolling twice in a trace.
+
+**Scrolling is smooth on a flagship, janky on a mid-range phone.** *Symptom:* reports you cannot reproduce. *Cause:* main-thread work inside the budget, absorbed by a faster CPU. *Fix:* profile a release build on cheap hardware; `framestats` rather than intuition.
+
+**Every frame runs a full layout pass while scrolling.** *Symptom:* traversal dominates the trace. *Cause:* a `requestLayout` from bind — often `setText` or a size-affecting setter. *Fix:* set values that do not change size, or keep the item size stable.
+
+**Content sits under the status bar on Android 15.** *Symptom:* a clipped header after a `targetSdk` bump. *Cause:* enforced edge-to-edge. *Fix:* consume `safeDrawing` insets (ch. 19).
+
+**An animation is smooth in one place and janky in another.** *Symptom:* identical duration, different feel. *Cause:* one animates RenderNode properties, the other changes layout. *Fix:* animate `translation`/`alpha`/`graphicsLayer`, not layout params.
+
+**A custom view has zero height inside a `RecyclerView`.** *Symptom:* invisible in a list, correct elsewhere. *Cause:* `onMeasure` treated `UNSPECIFIED` as a bound of zero. *Fix:* handle all three modes.
+
+## Cheat-sheet: Rendering pipeline
+
+```bash
+adb shell dumpsys gfxinfo <pkg> framestats         # per-stage nanoseconds, last 120 frames
+adb shell dumpsys gfxinfo <pkg> | grep -i janky    # quick percentage
+adb shell setprop debug.hwui.overdraw show         # overdraw overlay; 'false' to clear
+adb shell dumpsys SurfaceFlinger --latency <window> # composition timings
+```
+
+| Symptom | Look at |
+|---|---|
+| jank only on first scroll | shader compilation → Baseline Profile |
+| traversal dominates | a `requestLayout` in the scroll path |
+| RenderThread is the long bar | overdraw, large textures, complex clips |
+| smooth flagship, janky mid-range | main-thread work inside the budget |
+| animation feels heavy | animating layout instead of RenderNode properties |
+
+| Method | Cost |
+|---|---|
+| `invalidate()` | redraw this view |
+| `requestLayout()` | measure and layout **the whole tree** |
+
+<LabCard module=":ch06-rendering">
+Build a deliberately janky list — a `requestLayout` per bind, an oversized bitmap, an allocation in `onDraw` — then find each cause in a Perfetto trace rather than by reading the code you wrote. Fix them one at a time and show the before and after frame distribution from `dumpsys gfxinfo framestats`. The point of the lab is the diagnosis: you already know the answers, so grade yourself on whether the trace told you.
+</LabCard>
+
+## The View hierarchy
+
+A `View` is a rectangle that measures, lays out, draws and handles touch. A `ViewGroup` is a `View` that also positions children. Everything on screen in the old toolkit is one of those two.
+
+**`LayoutParams`** are the child's instructions *to its parent*, which is why `layout_width` lives on the child but is interpreted by the parent, and why the wrong parent type silently ignores attributes it does not understand — `layout_weight` in a `FrameLayout` does nothing at all.
+
+**Inflation is parsing at runtime** (ch. 8). `LayoutInflater` reads compiled XML, reflects to construct each view, applies attributes, and repeats. It is main-thread work proportional to the number of views, and it is the single biggest cost when a screen first appears.
+
+Three tools reduce it:
+
+- **`<merge>`** — when your layout's root would be a redundant container inside its parent, `<merge>` removes that level entirely.
+- **`<include>`** — reuse without copying.
+- **`ViewStub`** — a zero-size placeholder that inflates only when shown. The right answer for an error state or an empty view that most users never see.
+
+**The styles cascade** resolves in a fixed order: an attribute set directly on the view beats a `style`, which beats the theme, which beats the parent theme. `?attr/colorPrimary` reads from the theme at inflation time, which is how one layout serves light and dark (ch. 19). Getting a "wrong colour" is nearly always a view inflated with a `Context` whose theme is not the one you expected.
+
+## ConstraintLayout as a flat-hierarchy tool
+
+`ConstraintLayout` exists because of chapter 8's exponent: nesting multiplies measure passes, so the fix is not to nest.
+
+Each child declares constraints relative to its siblings or the parent, and a solver computes positions in — usually — a single pass. A screen that needed four nested `LinearLayout`s becomes one flat container.
+
+**Chains** distribute several views along an axis (spread, spread-inside, packed) — the replacement for weights. **Guidelines** are invisible anchors at a percentage or fixed offset. **Groups** toggle visibility of several views by id, without a wrapper that would reintroduce nesting. `Barrier` constrains to whichever of several views is largest, which is the clean fix for labels that change length across locales (ch. 19).
+
+`MotionLayout` extends it with keyframed transitions between two constraint sets. It is genuinely capable and genuinely hard to debug; for anything beyond a well-defined transition, a Compose animation is easier to reason about.
+
+## RecyclerView internals
+
+The most important class in the old toolkit, and the one whose internals most repay understanding.
+
+The split is deliberate. **Adapter** creates and binds; **ViewHolder** caches the results of `findViewById` for one item; **LayoutManager** decides positions; **Recycler** owns reuse.
+
+Reuse has two levels, and they are not the same:
+
+- The **scrap** holds views detached during the current layout pass — reattached without rebinding if they have not changed.
+- The **pool** holds views scrolled off-screen, keyed by view type. Taken from the pool, a view is **rebound** but not re-inflated.
+
+That is where the performance comes from: inflation happens roughly as many times as there are visible items plus a few, not once per item in a list of ten thousand.
+
+<Diagram
+  caption="Two levels of reuse. Scrap is for views detached during this layout pass; the pool holds views that scrolled off, keyed by view type. Only the pool path rebinds, and neither re-inflates."
+  label="Diagram of RecyclerView reuse: the adapter inflates a view holder only when the pool is empty; views detached during a layout pass go to scrap and return without rebinding; views scrolled off screen go to the pool and are rebound with new data when reused."
+>
+  <svg viewBox="0 0 660 268" width="660" height="268">
+    <rect x="12" y="34" width="150" height="130" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="87" y="28" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-accent)">ON SCREEN</text>
+    <rect x="26" y="46" width="122" height="22" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="87" y="61" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">holder 12</text>
+    <rect x="26" y="72" width="122" height="22" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="87" y="87" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">holder 13</text>
+    <rect x="26" y="98" width="122" height="22" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="87" y="113" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">holder 14</text>
+    <rect x="26" y="124" width="122" height="22" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="87" y="139" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">holder 15</text>
+
+    <rect x="252" y="30" width="156" height="52" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="330" y="50" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">SCRAP</text>
+    <text x="330" y="66" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">detached this pass</text>
+
+    <rect x="252" y="116" width="156" height="52" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="330" y="136" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">POOL</text>
+    <text x="330" y="152" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">off screen, by view type</text>
+
+    <rect x="486" y="72" width="160" height="52" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="566" y="92" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">ADAPTER</text>
+    <text x="566" y="108" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">inflates — the expensive bit</text>
+
+    <path d="M162 56 L252 56" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M244 50 L252 56 L244 62" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M252 70 L162 70" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M170 64 L162 70 L170 76" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="207" y="90" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-ok)">back, no rebind</text>
+
+    <path d="M162 142 L252 142" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M244 136 L252 142 L244 148" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M252 160 L162 160" fill="none" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <path d="M170 154 L162 160 L170 166" fill="none" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="207" y="180" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-accent)">rebind only</text>
+
+    <path d="M408 142 L446 142 L446 98 L486 98" fill="none" stroke="var(--dg-warn)" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <path d="M478 92 L486 98 L478 104" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <text x="447" y="130" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-warn)">pool empty</text>
+
+    <text x="330" y="216" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">A list of ten thousand inflates about as many views as fit on screen, plus prefetch.</text>
+    <text x="330" y="234" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">Nested lists each get their own pool unless you share one — which is the classic stutter.</text>
+  </svg>
+</Diagram>
+
+**`DiffUtil`** computes the minimum set of changes between two lists so you can animate rather than call `notifyDataSetChanged`, which rebinds everything and loses scroll position. `ListAdapter` wraps `AsyncListDiffer` and moves the diff to a background thread; `submitList` is then the only update path you need.
+
+**Stable IDs** let the adapter track an item across a diff, which is what makes move animations correct. Without them a moved item is an insert plus a delete.
+
+**"The list stutters on first scroll"** has a small set of causes, worth knowing as a checklist: inflation of the first screenful (prefetch helps, and `setInitialPrefetchItemCount` for nested lists), oversized bitmaps decoded on bind (ch. 17), `requestLayout` from a setter during bind (ch. 8), and a shared pool missing between nested `RecyclerView`s so the inner ones each inflate their own.
+
+```kotlin
+// Compose equivalent — the same reuse, with keys instead of stable IDs.
+LazyColumn {
+    items(articles, key = { it.id }, contentType = { it.kind }) { ArticleRow(it) }
+}
+```
+
+`key` is `setHasStableIds`. `contentType` is the view type that partitions the pool. The mechanism is the same; the bookkeeping is not yours.
+
+## Custom views
+
+Three methods, and the contracts matter more than the code.
+
+**`onMeasure`** must handle all three `MeasureSpec` modes (ch. 8) and must end by calling `setMeasuredDimension`. **`onLayout`** positions children, and only a `ViewGroup` needs it. **`onDraw`** paints — and must **allocate nothing**, because it runs up to sixty times a second. Create `Paint` and `Path` objects as fields.
+
+```kotlin
+class Meter(context: Context, attrs: AttributeSet?) : View(context, attrs) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)   // allocated once
+    private var value = 0f
+
+    fun setValue(v: Float) { value = v; invalidate() }  // appearance only — see ch. 8
+
+    override fun onDraw(canvas: Canvas) {
+        paint.color = trackColor
+        canvas.drawRect(0f, 0f, width * value, height.toFloat(), paint)
+    }
+}
+```
+
+**Saving state.** A custom view with internal state must implement `onSaveInstanceState`/`onRestoreInstanceState` and needs an **id** in the layout, because the framework saves view state keyed by id. A view without one is silently not saved — one of the quieter ways state is lost on rotation (ch. 5).
+
+**Touch handling** goes through `onTouchEvent` and `MotionEvent`. Use `ViewConfiguration` for thresholds rather than inventing constants: `scaledTouchSlop` is how far a finger may move before it is a scroll rather than a tap, and it differs by device density. `GestureDetector` handles the common gestures so you do not re-derive them.
+
+**Accessibility** is not automatic for a custom view. The framework cannot know what your drawing means, so you supply it — `contentDescription`, and an `AccessibilityDelegate` for anything interactive. Chapter 19 treats this properly; the point here is that a custom view is where accessibility is most often silently dropped.
+
+## Binding &amp; the death of `findViewById`
+
+`findViewById` returns a platform type (ch. 12) with no compile-time check that the id exists in *this* layout — so a wrong id compiles and throws.
+
+**ViewBinding** generates a class per layout with a typed, non-null field per id. It is the current recommendation: no annotation processing, no build-time cost worth mentioning, and it turns both failure modes into compile errors.
+
+**DataBinding** put expressions in XML. It is no longer recommended: logic in XML is not testable or debuggable, and it adds an annotation processor to your build (ch. 20). Migrate away from it where you can; do not add it.
+
+The **binding leak** is the same one as chapter 5, and it is worth repeating because it is the single most common leak in Fragment code: a Fragment outlives its view, so a binding held in a Fragment field keeps a destroyed view tree alive. Null it in `onDestroyView`.
+
+## Interop with Compose
+
+Both directions work, and incremental migration is the realistic path for an existing app.
+
+**`ComposeView` in XML** — put a Compose subtree inside a View layout:
+
+```kotlin
+binding.composeHost.setContent { ArticleHeader(state) }
+```
+
+**`AndroidView` in Compose** — put a View inside a composable, for a `MapView`, a `SurfaceView`, or an in-house widget not worth porting yet:
+
+```kotlin
+AndroidView(
+    factory = { context -> MapView(context) },   // called once
+    update = { it.setCenter(center) },           // called on every recomposition
+)
+```
+
+Keep `factory` cheap and `update` idempotent; `update` runs whenever a state it reads changes.
+
+Two boundary problems are worth knowing before you hit them. **Nested scrolling** across the boundary needs cooperation — a Compose scrollable inside a View scroller needs `rememberNestedScrollInteropConnection()`, or the two fight. And **theme bridging**: Compose does not read your XML theme, so colours diverge unless you map them deliberately. Chapter 19's advice — semantic tokens in one place, consumed by both — is what prevents a half-migrated app looking half-migrated.
+
+**A migration strategy that works:** migrate leaf-first, screen by screen, behind a flag. New screens in Compose; existing screens converted when you are already changing them. Do not convert a working screen for its own sake, and do not attempt a whole-app rewrite — the intermediate state lasts longer than anyone plans for, so it has to be a state the app can ship in.
+
+## Failure modes: Views & XML
+
+**A view's state is lost on rotation, but only that view.** *Symptom:* one custom widget resets while the rest of the screen restores. *Cause:* no `android:id`, so the framework had no key to save under. *Fix:* give it an id and implement the save/restore pair.
+
+**Memory grows with every navigation.** *Symptom:* heap climbs, LeakCanary points at a Fragment's view. *Cause:* a binding or view reference in a Fragment field. *Fix:* null it in `onDestroyView` (ch. 5).
+
+**`notifyDataSetChanged` loses scroll position and flickers.** *Symptom:* the list jumps on every update. *Cause:* the whole adapter invalidated. *Fix:* `ListAdapter` with `submitList`, plus stable IDs.
+
+**Nested lists stutter and allocate.** *Symptom:* an inner horizontal list in a vertical one is janky. *Cause:* each inner list has its own pool, so nothing is reused across them. *Fix:* a shared `RecycledViewPool`, and `setInitialPrefetchItemCount`.
+
+**Colours are wrong in one place only.** *Symptom:* a dialog or a dynamically added view ignores the theme. *Cause:* inflated with the wrong `Context` — application instead of themed activity. *Fix:* inflate with the Activity or a `ContextThemeWrapper`.
+
+**Compose and XML parts of one screen do not match.** *Symptom:* different greys either side of a boundary. *Cause:* two independent theme definitions. *Fix:* one source of semantic tokens, consumed by both (ch. 19).
+
+## Cheat-sheet: Views & XML
+
+```kotlin
+// binding, without the leak
+private var _binding: FeedBinding? = null
+private val binding get() = _binding!!
+override fun onDestroyView() { super.onDestroyView(); _binding = null }
+
+// list updates that animate and keep scroll position
+class FeedAdapter : ListAdapter<Article, VH>(DIFF) { /* submitList(newList) */ }
+
+// custom view: allocate in the constructor, never in onDraw
+private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+```
+
+```bash
+adb shell dumpsys activity <pkg> | grep -i "view hierarchy"
+adb shell setprop debug.layout true ; adb shell service call activity 1599295570  # layout bounds
+```
+
+| Views | Compose |
+|---|---|
+| `RecyclerView` + `ListAdapter` | `LazyColumn` with `items(key =)` |
+| stable IDs | `key` |
+| view type | `contentType` |
+| `ViewStub` | an `if` in the composable |
+| `ConstraintLayout` | `Row`/`Column`/`Box`, or `ConstraintLayout` for Compose |
+| `ViewBinding` | not needed — no ids |
+| `onSaveInstanceState` on a view | `rememberSaveable` |
+
+<LabCard module=":ch07-views">
+Take one XML screen with a `RecyclerView` and port it to Compose, keeping both behind a flag so they can run side by side in the same build. Measure the difference honestly with `am start -W` and a Perfetto trace: first-frame cost, inflation time, and jank on first scroll. Report the numbers even if they do not favour the new version — a fair comparison is the point, and the first Compose version of a screen is often not faster.
+</LabCard>
+
+## Insets &amp; edge-to-edge
+
+Chapter 8 established that system bars are separate windows drawn over yours. Insets are how you find out where.
+
+The kinds that matter: **system bars** (status, navigation), the **IME** (the keyboard, which animates), and **display cutouts**. Compose composes these into `safeDrawing` — do not draw anything under here — and `safeContent`, which also excludes gesture areas.
+
+```kotlin
+Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
+    LazyColumn(contentPadding = padding) { /* scrolls under the bars, but ends clear of them */ }
+}
+```
+
+The distinction that produces good edge-to-edge UI: apply insets as **padding on the scrolling content**, not as a margin on the container. Content then scrolls behind a translucent bar — which is the point of edge-to-edge — while the first and last items are still reachable.
+
+Android 15 <ApiLevel changedIn="35" /> enforces edge-to-edge, so this is no longer optional for apps targeting it: unhandled insets become clipped content.

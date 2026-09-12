@@ -1,0 +1,199 @@
+---
+title: "Frames: From a Value to a Pixel"
+navTitle: "Frames"
+summary: "One thread, one queue, one deadline every 16.6 ms. What happens between setting a value and a pixel changing, in Views and in Compose."
+readingTime: "2 hours"
+minutes: 120
+tags: []
+draft: true
+date: "2026-04-25"
+subtopic: "android-internals"
+subtopicOrder: 4
+part: "I"
+verifiedAgainst: "compileSdk 36 · AGP 8.13 · Kotlin 2.3"
+stage: "outline"
+labModule: ":ch04-frames"
+sources: ["05-main-thread-coroutines-and-flow#Looper, Handler, MessageQueue","05-main-thread-coroutines-and-flow#The frame budget","06-rendering-pipeline#Beyond the app process","06-rendering-pipeline#Where frames are lost","06-rendering-pipeline#Measuring rather than guessing","06-rendering-pipeline#Why Compose exists","08-jetpack-compose-from-first-principles#Declarative vs imperative"]
+---
+Chapter 12 gave you the deadline: 16.6 ms, on a queue shared with everything else. This chapter is what has to happen inside it.
+
+The value of knowing this pipeline is that jank stops being mysterious. "The list stutters" becomes "the layout pass is running for every item because a `requestLayout` is walking to the root" — a sentence with a fix in it. And the pipeline is the same underneath Views and Compose, which is why this chapter sits before both.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Looper, Handler, MessageQueue
+
+The primitive is older than every framework built on it, and it is worth seeing plainly because everything else is a wrapper.
+
+A thread with a **`Looper`** runs an infinite loop pulling messages off a **`MessageQueue`** and dispatching them. A **`Handler`** is bound to a Looper and is how you put a message on. That is the whole mechanism.
+
+```kotlin
+// This is what the main thread is doing, forever.
+Looper.prepare()
+val queue = MessageQueue()
+while (true) {
+    val message = queue.next()   // blocks until something arrives, or a delay expires
+    message.target.dispatchMessage(message)
+}
+Looper.loop()
+```
+
+`ActivityThread.main()` sets this up and calls `Looper.loop()`, which never returns. So the main thread is not "running your app" — it is sitting in a loop, and your `onCreate`, your click listener, your frame callback are all *messages that were dispatched to it*.
+
+Two consequences fall directly out of that:
+
+**Ordering, not concurrency.** Messages run one at a time, in order (with delayed ones ordered by their due time). There is no interleaving, so no lock is needed. A `post {}` does not run "in parallel"; it runs *after* whatever is currently running finishes.
+
+**Blocking is total.** A message that takes 500 ms blocks every other message for 500 ms — including the frame callback. This is why `View` methods throw `CalledFromWrongThreadException` off the main thread: the whole safety argument rests on there being exactly one toucher.
+
+`postDelayed` is the origin of a common leak: a `Handler` holds its `Runnable`, the `Runnable` holds your Activity, and a queued message keeps both alive until it fires. Cancel in `onStop`, or use a coroutine whose scope is cancelled for you.
+
+## The frame budget
+
+The single most useful number in Android performance, and everything in chapters 8 and 11 is downstream of it.
+
+The display refreshes at a fixed rate. At 60 Hz a new frame is needed every **16.6 ms**; at 120 Hz, every **8.3 ms**. `Choreographer` receives a vsync signal from the display and posts the frame work — input, animation, measure, layout, draw — onto the main thread's queue.
+
+<Diagram
+  caption="The frame budget is a deadline on the same queue as everything else. A 40 ms message does not slow one frame down; it destroys two whole frames, because the frame work could not even start."
+  label="Timeline showing vsync every 16.6 milliseconds. A short frame finishes inside its budget. A 40 millisecond main-thread call blocks the queue so two consecutive vsync deadlines are missed and the display repeats the previous frame twice."
+>
+  <svg viewBox="0 0 660 250" width="660" height="250">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">HEALTHY — WORK FITS INSIDE THE BUDGET</text>
+    <path d="M20 30 L20 78M170 30 L170 78M320 30 L320 78M470 30 L470 78M620 30 L620 78" fill="none" stroke="var(--dg-muted)" stroke-width="1" stroke-dasharray="3 3"/>
+    <text x="20" y="28" font-family="var(--font-mono)" font-size="9" fill="var(--dg-muted)">vsync</text>
+    <rect x="22" y="42" width="86" height="26" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="65" y="59" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">frame 9 ms</text>
+    <rect x="172" y="42" width="86" height="26" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="215" y="59" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">frame 9 ms</text>
+    <rect x="322" y="42" width="86" height="26" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="365" y="59" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">frame 9 ms</text>
+    <text x="545" y="59" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">every deadline met</text>
+
+    <text x="12" y="118" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">JANK — ONE LONG MESSAGE ON THE SAME QUEUE</text>
+    <path d="M20 130 L20 186M170 130 L170 186M320 130 L320 186M470 130 L470 186M620 130 L620 186" fill="none" stroke="var(--dg-muted)" stroke-width="1" stroke-dasharray="3 3"/>
+    <rect x="22" y="142" width="86" height="26" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="65" y="159" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">frame 9 ms</text>
+    <rect x="172" y="142" width="360" height="26" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="352" y="159" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">your 40 ms call — the queue is busy</text>
+    <text x="245" y="200" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">deadline missed</text>
+    <text x="395" y="200" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">deadline missed</text>
+    <text x="330" y="226" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">the display has nothing new to show, so it repeats the last frame —</text>
+    <text x="330" y="242" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">which the user sees as a stutter, not as "slightly slower".</text>
+  </svg>
+</Diagram>
+
+The arithmetic is unforgiving and worth internalising: at 60 Hz you have 16.6 ms for *everything* — your callback, measure, layout, draw, and handing the result to the RenderThread. A 40 ms main-thread call does not make one frame late; it eliminates two, and the user perceives a jump rather than a slowdown.
+
+This is why "it feels fast on my Pixel" is not evidence. A flagship absorbs sloppiness that a mid-range device turns into visible stutter, which is chapter 11's argument for profiling release builds on cheap hardware.
+
+## Beyond the app process
+
+Draw does not paint pixels. It **records** them, and the real work happens elsewhere — which is the part most engineers have never seen.
+
+<Diagram
+  caption="Your process records; the RenderThread executes on the GPU; SurfaceFlinger composites every app's window into the frame the display shows. Only the first box is yours."
+  label="Pipeline diagram: the main thread measures, lays out and records display lists into RenderNodes; the RenderThread issues GPU commands into a buffer; SurfaceFlinger composites buffers from every visible window, using hardware overlays where it can, and the display scans out the result at vsync."
+>
+  <svg viewBox="0 0 660 244" width="660" height="244">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-accent)">YOUR PROCESS</text>
+    <rect x="8" y="26" width="290" height="96" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <rect x="22" y="38" width="126" height="34" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="85" y="59" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">main thread</text>
+    <text x="85" y="88" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">measure, layout,</text>
+    <text x="85" y="102" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">record display lists</text>
+    <rect x="164" y="38" width="122" height="34" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="225" y="59" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">RenderThread</text>
+    <text x="225" y="88" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">issues GPU commands</text>
+    <text x="225" y="102" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">from the RenderNodes</text>
+    <path d="M148 55h16" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <rect x="330" y="26" width="150" height="96" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="405" y="48" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">SurfaceFlinger</text>
+    <text x="405" y="70" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">composites every</text>
+    <text x="405" y="84" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">visible window; uses</text>
+    <text x="405" y="98" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">hardware overlays</text>
+    <path d="M298 74h32" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M322 68 L330 74 L322 80" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <rect x="512" y="26" width="140" height="96" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="582" y="48" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">display</text>
+    <text x="582" y="70" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">scans out at vsync</text>
+    <text x="582" y="84" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">every 16.6 ms</text>
+    <path d="M480 74h32" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M504 68 L512 74 L504 80" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <rect x="8" y="150" width="644" height="42" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-dasharray="4 3"/>
+    <text x="330" y="167" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">triple buffering: three buffers in flight</text>
+    <text x="330" y="183" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">one being displayed, one queued, one being drawn into — the slack that absorbs a slow frame</text>
+
+    <text x="330" y="218" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">only the leftmost box runs your code. Everything right of it is another process,</text>
+    <text x="330" y="234" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">which is why a frame can be late for reasons that never appear in your profiler.</text>
+  </svg>
+</Diagram>
+
+A **RenderNode** holds a recorded display list plus properties — position, alpha, transform. The important consequence: changing a *property* does not require re-recording. Animating `translationX` or `alpha` on a `View`, or using `graphicsLayer` in Compose, updates a RenderNode property and skips draw entirely. Animating by changing layout parameters does not, which is why the two feel different at the same frame rate.
+
+**SurfaceFlinger** composites the windows of every visible app. Where it can, the display hardware composites directly through an **overlay**, with no GPU work at all. Buffer queues plus triple buffering give one frame of slack — which is why a single slow frame sometimes shows nothing and two in a row always do.
+
+## Where frames are lost
+
+Ranked by how often they turn out to be the cause.
+
+**Main-thread stalls.** Anything from chapter 12 — I/O, a Binder call, lock contention — inside the frame budget. Still the most common by a distance.
+
+**Layout thrash.** A `requestLayout` per item per frame, usually from a setter called during bind.
+
+**Overdraw.** Painting the same pixel several times: a window background under an opaque container under an opaque card. The GPU debug overlay shows it in colour; two layers is usually fine, four is not.
+
+**Large bitmap uploads.** A texture upload on first display of a big image blocks the RenderThread. Chapter 17 sizes bitmaps to the view.
+
+**GC pauses.** Allocation inside `onDraw` or a per-frame lambda. Sixty frames a second of garbage produces collections at exactly the wrong moment.
+
+**Cold shader compilation.** The first time a particular drawing operation runs, its shader is compiled — visible as jank on the very first scroll or first screen, and never again. This is what **Baseline Profiles** address (ch. 2, ch. 11): the work is done before the user's first launch.
+
+## Measuring rather than guessing
+
+Every claim in this chapter is checkable, and chapter 11 makes that a CI gate.
+
+```bash
+adb shell dumpsys gfxinfo <pkg>                # aggregate: janky frame percentage
+adb shell dumpsys gfxinfo <pkg> framestats     # the last 120 frames, per stage, in ns
+```
+
+`framestats` is the highest-value output here. Each row is one frame with timestamps for input, animation, traversal, draw, sync, GPU and swap. Subtracting adjacent columns tells you *which stage* was slow, which immediately separates "my code is slow" from "the GPU is the bottleneck".
+
+**Perfetto** shows the same thing as a timeline, with the main thread and RenderThread side by side, so a frame blocked on the RenderThread is visually obvious. **JankStats** reports jank from real devices in the field, which is the only way to learn about the hardware you do not own. **"Profile HWUI rendering"** in developer options draws per-frame bars live — coarse, but it finds a regression in seconds.
+
+## Why Compose exists
+
+With the pipeline in hand, the motivation is concrete rather than fashionable.
+
+**Inflation is parsing at runtime.** Every XML layout is parsed and reflected into objects on the main thread, on first use.
+
+**Deep hierarchies multiply measure passes,** as above, and the View system's answer — `ConstraintLayout` — is a flat hierarchy with a constraint solver, which is a workaround rather than a fix.
+
+**Mutable view state means the source of truth is the view tree.** You set text on a view, and now the view holds state your model does not. Keeping them in sync by hand is where a large share of UI bugs live.
+
+**Nothing knows what changed.** A View has no idea which of its properties depend on which data, so invalidation is manual and either too broad (jank) or too narrow (stale UI).
+
+Compose changes exactly these four: no inflation (composables are functions), a single measure pass by contract, state that the runtime *observes*, and invalidation computed from what was actually read. Chapter 13 shows the machinery. What it does not change is anything to the right of your process in the diagram above — the RenderThread, SurfaceFlinger and the 16.6 ms are identical.
+
+## Declarative vs imperative
+
+In the View world you *mutate*: find a view, set its text. The view tree is the source of truth, and keeping it in sync with your data is your job (ch. 8, ch. 8).
+
+In Compose you *describe*: given this state, the UI looks like this. The runtime compares descriptions and applies the difference.
+
+```kotlin
+@Composable
+fun Counter(count: Int, onIncrement: () -> Unit) {
+    Button(onClick = onIncrement) { Text("Tapped $count times") }
+}
+```
+
+There is no `setText`. When `count` changes the function runs again, produces a different description, and the runtime updates the one thing that differs.
+
+What that buys: no possible desync between model and view, and invalidation computed rather than hand-written. What it costs: your function may run **many times a second**, so it must be cheap and it must be safe to run repeatedly — which is the source of most of the rules below.

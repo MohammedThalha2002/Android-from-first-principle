@@ -1,0 +1,314 @@
+---
+title: "Persistence"
+navTitle: "Persistence"
+summary: "Where data lives when the process is gone: DataStore, SQLite and Room, migrations, files, media and backup."
+readingTime: "2 hours"
+minutes: 125
+tags: ["sharedpreferences","datastore","proto datastore","sqlite","wal","transaction","index","explain query plan","room","dao","migration","migrationtesthelper","fileprovider","scoped storage","mediastore","photo picker","keystore","strongbox","biometricprompt","auto backup"]
+draft: true
+date: "2026-07-11"
+subtopic: "android-internals"
+subtopicOrder: 15
+part: "III"
+verifiedAgainst: "Room 2.8 · DataStore 1.2 · compileSdk 36"
+stage: "outline"
+labModule: ":ch15-persistence"
+sources: ["14-local-persistence-and-storage#The storage map","14-local-persistence-and-storage#Key-value done right","14-local-persistence-and-storage#SQLite fundamentals","14-local-persistence-and-storage#Room","14-local-persistence-and-storage#Migrations, the part that breaks users","14-local-persistence-and-storage#Files &amp; media","14-local-persistence-and-storage#Backup &amp; data portability","14-local-persistence-and-storage#Failure modes","14-local-persistence-and-storage#Cheat-sheet"]
+---
+Chapter 5 established that anything not written down disappears when the process does. This chapter is about writing it down — and about why Android has half a dozen APIs for that rather than one.
+
+The proliferation is not historical accident. Each API answers a different combination of three questions: **who else can read it**, **is it structured**, and **what happens when the app is uninstalled**. Get those three right for your data and the API chooses itself.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## The storage map
+
+| Where | Visible to | Survives uninstall | Use for |
+|---|---|---|---|
+| `filesDir` | your UID only (ch. 2) | no | app data you own |
+| `cacheDir` | your UID only | no — **and the OS may delete it any time** | anything regenerable |
+| DataStore | your UID only | no | key-value and small typed settings |
+| Room / SQLite | your UID only | no | structured, queryable data |
+| KeyStore | nobody — keys never leave secure hardware | no | encryption keys, not data |
+| `MediaStore` | other apps, via the media collections | **yes** | photos, video, audio the user keeps |
+| SAF | wherever the user picked | yes | documents the user chose |
+| External app-specific | your app, no permission needed | no | large files not worth backing up |
+
+Two rules fall out immediately. **`cacheDir` can be emptied while your app is running**, so code that assumes a cached file exists is wrong; always handle the miss. And **anything the user should keep after uninstalling** — photos they took, documents they exported — belongs in MediaStore or a location they chose, not in your app directory.
+
+## Key-value done right
+
+`SharedPreferences` is the API everyone starts with and it has three real problems, all of which show up as ANRs (ch. 12).
+
+**The first read is synchronous disk I/O.** `getSharedPreferences` loads and parses the entire XML file on the calling thread. On the main thread during startup, that is a measurable chunk of your cold start (ch. 11).
+
+**`commit()` is a synchronous write.** On the main thread, it blocks on the filesystem.
+
+**`apply()` is not free either.** It returns immediately but enqueues an fsync — and `onPause`/`onStop` **wait for all pending fsyncs to finish**. So `apply()` moves the cost to a lifecycle callback rather than removing it, which is why the ANR appears when leaving a screen rather than where the write was.
+
+**DataStore** replaces it: fully asynchronous, transactional, and it exposes a `Flow`.
+
+```kotlin
+val Context.settings by preferencesDataStore("settings")
+
+val darkTheme: Flow<Boolean> = context.settings.data
+    .catch { if (it is IOException) emit(emptyPreferences()) else throw it }   // corruption
+    .map { it[booleanPreferencesKey("dark")] ?: false }
+
+suspend fun setDarkTheme(on: Boolean) {
+    context.settings.edit { it[booleanPreferencesKey("dark")] = on }   // transactional
+}
+```
+
+Two flavours: **Preferences DataStore** is untyped key-value, an easy migration from `SharedPreferences`; **Proto DataStore** uses a protobuf schema for a typed object with real defaults, which is better for anything with structure.
+
+Two caveats. `edit` is a **transaction** — read-modify-write inside it, never read outside and write inside, or you have a race. And DataStore is **not multi-process safe**; if you genuinely have two processes (ch. 6), it is the wrong tool.
+
+## SQLite fundamentals
+
+Room generates SQLite, so its behaviour is your performance ceiling.
+
+**Pages and the write-ahead log.** SQLite stores data in fixed-size pages. In WAL mode — Room's default — a write appends to a separate log rather than rewriting the database, which lets **readers continue while a writer is active**. That is the single biggest reason a Room query on a background thread does not block your UI query.
+
+<Diagram
+  caption="Write-ahead logging. A writer appends to the log instead of rewriting pages, so readers keep serving from the database plus the log — nobody blocks. A checkpoint folds the log back in."
+  label="Diagram of SQLite write-ahead logging: the writer appends new pages to a WAL file rather than modifying the main database file, readers read the database plus the WAL and are never blocked by the writer, and a periodic checkpoint merges the WAL back into the database."
+>
+  <svg viewBox="0 0 660 254" width="660" height="254">
+    <rect x="12" y="34" width="140" height="60" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="82" y="58" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">WRITER</text>
+    <text x="82" y="76" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">one at a time</text>
+
+    <rect x="12" y="136" width="140" height="60" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="82" y="160" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">READERS</text>
+    <text x="82" y="178" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">many, never blocked</text>
+
+    <rect x="242" y="26" width="180" height="76" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="332" y="48" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-ok)">WAL FILE</text>
+    <text x="332" y="66" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">appended, never rewritten</text>
+    <text x="332" y="82" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">one fsync per transaction</text>
+
+    <rect x="242" y="130" width="180" height="76" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="332" y="152" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">DATABASE FILE</text>
+    <text x="332" y="170" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">fixed-size pages</text>
+    <text x="332" y="186" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">untouched while writing</text>
+
+    <path d="M152 64 L242 64" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M234 58 L242 64 L234 70" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="197" y="56" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-ok)">append</text>
+
+    <path d="M152 168 L242 168" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M234 162 L242 168 L234 174" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M118 136 L118 110 L200 110 L200 74 L242 74" fill="none" stroke="var(--dg-line)" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <path d="M234 68 L242 74 L234 80" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="176" y="128" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">reads both</text>
+
+    <path d="M332 102 L332 130" fill="none" stroke="var(--dg-muted)" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <path d="M326 122 L332 130 L338 122" fill="none" stroke="var(--dg-muted)" stroke-width="1.5"/>
+    <text x="344" y="120" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">checkpoint</text>
+
+    <text x="466" y="60" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">A thousand inserts in one</text>
+    <text x="466" y="76" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">transaction is ONE fsync.</text>
+    <text x="466" y="98" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">A thousand transactions</text>
+    <text x="466" y="114" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">is a thousand — which is</text>
+    <text x="466" y="130" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">the slow bulk import.</text>
+
+    <text x="330" y="240" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">Room enables WAL by default, which is why a background write does not stall the UI query.</text>
+  </svg>
+</Diagram>
+
+**Transactions and the fsync cost.** Every transaction ends with a durability barrier. A thousand inserts in a thousand transactions is a thousand fsyncs; the same inserts in one transaction is one. The difference is routinely two orders of magnitude:
+
+```kotlin
+@Transaction
+suspend fun replaceAll(articles: List<ArticleEntity>) {
+    deleteAll()
+    insertAll(articles)     // one transaction, one durability barrier
+}
+```
+
+**Indices** make reads fast and writes slower — every index is another structure to update on insert. Index what you filter, join or sort by; do not index everything.
+
+**`EXPLAIN QUERY PLAN`** is how you find out whether your index is used, rather than assuming:
+
+```sql
+EXPLAIN QUERY PLAN SELECT * FROM article WHERE topic = ? ORDER BY published DESC;
+-- SEARCH article USING INDEX index_article_topic (topic=?)      ← good
+-- SCAN article                                                   ← full table scan
+```
+
+**FTS** provides real full-text search, which `LIKE '%term%'` cannot do efficiently — a leading wildcard defeats every index.
+
+**`VACUUM`** reclaims space after large deletions; deleted rows leave free pages that the file does not give back on its own.
+
+## Room
+
+Room is a compile-time-checked layer over SQLite: your SQL is **verified against your schema at build time**, so a typo is a build error rather than a crash.
+
+```kotlin
+@Entity(indices = [Index("topic")])
+data class ArticleEntity(
+    @PrimaryKey val id: String,
+    val title: String,
+    val topic: String,
+    val published: Long,
+)
+
+@Dao interface ArticleDao {
+    @Query("SELECT * FROM ArticleEntity ORDER BY published DESC")
+    fun observeAll(): Flow<List<ArticleEntity>>          // re-emits on any change to the table
+
+    @Upsert suspend fun upsert(items: List<ArticleEntity>)
+
+    @Transaction @Query("SELECT * FROM ArticleEntity WHERE id = :id")
+    suspend fun withComments(id: String): ArticleWithComments   // a relation query
+}
+```
+
+**`Flow`-returning queries and invalidation tracking** are the feature that makes chapter 17 possible. Room tracks which tables a query touches and re-runs it when any of them change — so the network writes to the database and the UI updates, with nothing wiring them together.
+
+The invalidation is **table-level, not row-level**: any write to `ArticleEntity` re-runs every query observing it. Usually fine; occasionally a reason to split a hot table.
+
+`@Transaction` on a relation query matters for correctness — without it, Room runs several queries and a concurrent write between them yields an inconsistent object.
+
+`RoomDatabase.Callback` seeds data on first creation, and `createFromAsset` ships a prepopulated database.
+
+## Migrations, the part that breaks users
+
+The highest-stakes code in your app. A migration bug does not produce a wrong pixel; it crashes on launch for everyone who had the previous version, and they cannot get past it.
+
+**Auto-migrations** handle the mechanical cases — added or removed columns, renames with an annotation:
+
+```kotlin
+@Database(
+    entities = [ArticleEntity::class], version = 3,
+    autoMigrations = [AutoMigration(from = 2, to = 3, spec = Db.RenameSummary::class)],
+    exportSchema = true,
+)
+abstract class Db : RoomDatabase() {
+    @RenameColumn(tableName = "ArticleEntity", fromColumnName = "blurb", toColumnName = "summary")
+    class RenameSummary : AutoMigrationSpec
+}
+```
+
+**Manual migrations** are needed when data must be transformed — splitting a column, backfilling from another table. Write the SQL, and remember it runs on a user's real data, once, with no second chance.
+
+**`fallbackToDestructiveMigration` deletes the user's data.** It is acceptable for a pure cache that can be refetched, and unacceptable for anything the user created. Being explicit about which of those a database is should be a decision recorded in code review, not a default someone copied.
+
+**Test every migration**, and do it against real schemas:
+
+```kotlin
+@get:Rule val helper = MigrationTestHelper(
+    InstrumentationRegistry.getInstrumentation(), Db::class.java,
+)
+
+@Test fun migrate2To3() {
+    helper.createDatabase(TEST_DB, 2).apply {
+        execSQL("INSERT INTO ArticleEntity VALUES ('1','Title','tech',0,'old blurb')")
+        close()
+    }
+    val db = helper.runMigrationsAndValidate(TEST_DB, 3, true)
+    db.query("SELECT summary FROM ArticleEntity WHERE id='1'").use {
+        it.moveToFirst()
+        assertEquals("old blurb", it.getString(0))   // the DATA survived, not just the schema
+    }
+}
+```
+
+`exportSchema = true` writes a JSON schema per version; **commit those files**. `runMigrationsAndValidate` compares against them, which is what catches "the migration ran but the schema does not match the entity" — the failure that otherwise appears as a crash two releases later.
+
+**A post-mortem worth internalising.** A team adds a non-null column with no default. The auto-migration generates `ALTER TABLE ADD COLUMN ... NOT NULL`, which SQLite rejects on a table with existing rows. It works in development, because developers install fresh. It crashes on launch for every existing user. The schema JSON and a migration test would both have caught it; neither was in CI.
+
+## Files &amp; media
+
+**Internal** (`filesDir`) is yours, sandboxed, backed up by default. **External app-specific** (`getExternalFilesDir`) needs no permission, is removed on uninstall, and suits large files not worth backing up.
+
+**Sharing a file with another app** never means making it world-readable. `FileProvider` grants temporary, per-URI access (ch. 6):
+
+```kotlin
+val uri = FileProvider.getUriForFile(context, "$packageName.files", file)
+val intent = Intent(Intent.ACTION_SEND).apply {
+    setDataAndType(uri, "application/pdf")
+    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)   // this call only
+}
+```
+
+**Scoped storage** <ApiLevel changedIn="29" /> ended broad filesystem access. You reach shared media through `MediaStore`, and arbitrary documents through the **Storage Access Framework**, where the user picks and thereby grants.
+
+The **Photo Picker** <ApiLevel min="33" /> is the modern answer for images and video, and the important property is that it needs **no permission at all** — the user selecting a photo *is* the grant. Requesting `READ_MEDIA_IMAGES` to show a picker is both worse UX and a Play Data Safety liability (ch. 10).
+
+Writing to MediaStore uses `IS_PENDING` so a half-written file is not visible to other apps until you clear it.
+
+**Cache eviction** is real: `cacheDir` is deleted under storage pressure, and `StorageManager` lets you ask for a quota. Never store anything in cache that you cannot regenerate.
+
+## Backup &amp; data portability
+
+Android backs your app up **by default**, to the cloud and via device-to-device transfer. Most teams discover this when something goes wrong.
+
+The classic bug: an auth token or a device-bound key is backed up, restored onto a **new device**, and is invalid there — so the user reinstalls and lands in a broken half-signed-in state that no amount of restarting fixes.
+
+```xml
+<!-- res/xml/data_extraction_rules.xml -->
+<data-extraction-rules>
+  <cloud-backup>
+    <exclude domain="sharedpref" path="auth.xml" />
+    <exclude domain="database" path="cache.db" />
+  </cloud-backup>
+  <device-transfer>
+    <exclude domain="sharedpref" path="auth.xml" />
+  </device-transfer>
+</data-extraction-rules>
+```
+
+**Exclude secrets and anything device-bound.** Include what makes a restore feel like a continuation. And test the restore path, because it is invisible until a user hits it.
+
+## Failure modes: Persistence & storage
+
+**An ANR when leaving a screen.** *Symptom:* the trace shows `onPause` waiting on the filesystem. *Cause:* `SharedPreferences.apply()` fsyncs awaited at lifecycle boundaries. *Fix:* DataStore.
+
+**A migration crashes on launch for existing users only.** *Symptom:* 100 % crash rate for upgraders, none for fresh installs. *Cause:* an untested migration — often a non-null column with no default. *Fix:* `MigrationTestHelper` plus committed schema JSON in CI.
+
+**The app is slow to start after a few weeks of use.** *Symptom:* startup degrades over time. *Cause:* an unindexed query over a table that grew, or a missing `VACUUM` after bulk deletes. *Fix:* `EXPLAIN QUERY PLAN`; index what you filter on.
+
+**Bulk import takes minutes.** *Symptom:* a sync of a few thousand rows is unreasonably slow. *Cause:* one transaction per row. *Fix:* one `@Transaction`.
+
+**Users are signed out after restoring to a new phone.** *Symptom:* a broken half-authenticated state after device transfer. *Cause:* a token or device-bound key included in backup. *Fix:* exclude it in the extraction rules; handle the restored-invalid case.
+
+**A cached file is missing and the app crashes.** *Symptom:* rare crashes reading from `cacheDir`. *Cause:* the OS evicted it. *Fix:* treat every cache read as a possible miss.
+
+**Encrypted data is unreadable after a reinstall.** *Symptom:* decryption fails for users who reinstalled. *Cause:* KeyStore keys do not survive uninstall, but the ciphertext was backed up. *Fix:* exclude encrypted blobs from backup, or re-derive on first run.
+
+## Cheat-sheet: Persistence & storage
+
+```kotlin
+// settings: transactional, async, observable
+context.settings.edit { it[KEY] = value }
+
+// bulk work: one transaction
+@Transaction suspend fun replaceAll(items: List<E>) { deleteAll(); insertAll(items) }
+
+// share a file without making it public
+FileProvider.getUriForFile(ctx, "$pkg.files", file)   // + FLAG_GRANT_READ_URI_PERMISSION
+```
+
+```bash
+adb shell run-as <pkg> ls -la databases/          # debuggable builds only
+adb exec-out run-as <pkg> cat databases/app.db > local.db   # then open in a SQLite browser
+adb shell dumpsys diskstats
+adb shell pm clear <pkg>                          # wipe everything: test first-run and restore
+```
+
+| Data | Where |
+|---|---|
+| a setting | Proto DataStore |
+| structured, queried | Room |
+| regenerable | `cacheDir` (assume it can vanish) |
+| a photo the user keeps | MediaStore |
+| a document the user picked | SAF |
+| a token | KeyStore-encrypted, excluded from backup |
+
+<LabCard module=":ch14-persistence">
+Build a Room database through three schema versions with passing `MigrationTestHelper` tests for each hop — including one migration that transforms data, not just schema. Add a Proto DataStore for settings and a KeyStore-encrypted token store. Then do the part teams skip: `adb shell pm clear`, reinstall, and prove the restore path leaves the app in a coherent state rather than half-signed-in.
+</LabCard>

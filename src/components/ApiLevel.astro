@@ -1,0 +1,60 @@
+---
+/**
+ * An inline API-level badge: the Android-specific affordance the backend
+ * series has no equivalent of, and the alternative to prose that rots.
+ *
+ *   <ApiLevel min="26" />          requires API 26+
+ *   <ApiLevel changedIn="34" />    behaviour changed in 34
+ *   <ApiLevel removedIn="35" />    gone in 35
+ *   <ApiLevel level="31" />        bare level (legacy spelling)
+ *
+ * `min` reads as neutral information and takes the group accent; a change
+ * or a removal is a warning and takes amber or coral, because those are the
+ * ones that will break a reader's build.
+ */
+interface Props {
+  min?: string | number;
+  changedIn?: string | number;
+  removedIn?: string | number;
+  /** Older spelling, kept so existing chapters keep working. */
+  level?: string | number;
+}
+
+const { min, changedIn, removedIn, level } = Astro.props;
+
+const variant = removedIn !== undefined
+  ? { tint: 'coral', label: `Removed in API ${removedIn}`, short: `−${removedIn}` }
+  : changedIn !== undefined
+    ? { tint: 'amber', label: `Behaviour changed in API ${changedIn}`, short: `Δ${changedIn}` }
+    : { tint: 'accent', label: `Requires API ${min ?? level}`, short: `API ${min ?? level}+` };
+---
+
+<abbr class="api-level" data-tint={variant.tint} title={variant.label}>
+  <span class="visually-hidden">{variant.label}</span>
+  <span aria-hidden="true">{variant.short}</span>
+</abbr>
+
+<style>
+  .api-level {
+    border-radius: var(--radius-pill);
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.78em;
+    font-weight: var(--weight-semibold);
+    letter-spacing: 0;
+    padding: 0.1em 0.5em;
+    text-decoration: none;
+    vertical-align: 0.06em;
+    white-space: nowrap;
+  }
+  .api-level[data-tint='accent'] { background: var(--accent-bg); color: var(--accent); }
+
+  .visually-hidden {
+    clip-path: inset(50%);
+    height: 1px;
+    overflow: hidden;
+    position: absolute;
+    white-space: nowrap;
+    width: 1px;
+  }
+</style>

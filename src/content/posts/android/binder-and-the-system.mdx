@@ -1,0 +1,248 @@
+---
+title: "Binder & the System"
+navTitle: "Binder"
+summary: "Everything outside your process is reached through one mechanism with one size limit. Which process you are in, and why it matters."
+readingTime: "2 hours"
+minutes: 120
+tags: []
+draft: true
+date: "2026-04-18"
+subtopic: "android-internals"
+subtopicOrder: 3
+part: "I"
+verifiedAgainst: "compileSdk 36 · AGP 8.13 · Kotlin 2.3"
+stage: "outline"
+labModule: ":ch03-binder"
+sources: ["01-platform-from-the-ground-up#Why a Bundle has a size limit","17-background-work-and-process-priority#Process priority &amp; the OOM killer"]
+---
+Everything outside your process is reached through one mechanism with one size limit. Which process you are in, and why it matters.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Why a Bundle has a size limit
+
+**You will:** cause `TransactionTooLargeException` on purpose, explain where the limit comes from, and fix it.
+**You need:** an Activity with a button, and a second Activity to open.
+**Time:** about 15 minutes.
+**Built with:** compileSdk 36, AGP 8.13, Kotlin 2.3.
+
+### The problem you can see
+
+Open a second screen and attach two megabytes to the intent:
+
+```kotlin
+// MainActivity.kt
+Button(onClick = {
+    startActivity(
+        Intent(this, DetailActivity::class.java)
+            .putExtra("payload", ByteArray(2_000_000))
+    )
+}) { Text("Open detail") }
+```
+
+Tap it.
+
+```
+java.lang.RuntimeException: android.os.TransactionTooLargeException: data parcel size 2000xxx bytes
+```
+
+(The last digits are your array plus a little packaging, so they vary.) Nothing in Kotlin forbids a two-megabyte array. The rule is not in your code.
+
+### What is actually happening
+
+`startActivity` does not start anything by itself. Your process is not allowed to. It sends a request to a different process called **`system_server`**, the one system process that runs Android's core services: which screen is showing, which apps are installed, what notifications exist.
+
+Your process cannot reach into `system_server`'s memory, so Android copies the request across. It packs your Intent, extras included, into bytes and hands them to a part of the operating system called **Binder**, which copies them into the other process and waits for the answer. Every request your app makes to the system goes this way.
+
+<Diagram
+  caption="One Binder call. The proxy in your process serialises into a parcel; the kernel driver copies it once into the target's pre-mapped buffer; a thread from the target's pool runs the real method."
+  label="Sequence of a Binder transaction: your thread calls a proxy, which parcels the arguments and blocks; the kernel driver performs a single copy into the target process's mapped transaction buffer; a thread from the target's binder pool executes the method and returns a reply the same way."
+>
+  <svg viewBox="0 0 660 290" width="660" height="290">
+    <rect x="8" y="8" width="188" height="264" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="102" y="28" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">your process</text>
+    <rect x="236" y="8" width="188" height="264" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="330" y="28" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-warn)">kernel: Binder driver</text>
+    <rect x="464" y="8" width="188" height="264" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="558" y="28" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">system server</text>
+
+    <rect x="22" y="46" width="160" height="34" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="102" y="60" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-accent)">manager.doThing()</text>
+    <text x="102" y="74" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">looks like a method call</text>
+
+    <rect x="22" y="92" width="160" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="102" y="111" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">proxy parcels arguments</text>
+
+    <rect x="22" y="134" width="160" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)" stroke-dasharray="4 3"/>
+    <text x="102" y="153" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">your thread BLOCKS</text>
+
+    <rect x="250" y="92" width="160" height="52" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="330" y="110" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">ONE copy into the</text>
+    <text x="330" y="124" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">target mapped buffer</text>
+    <text x="330" y="138" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">about 1 MB, per process</text>
+
+    <rect x="478" y="92" width="160" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="558" y="111" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">a pooled thread wakes</text>
+    <rect x="478" y="134" width="160" height="30" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="558" y="153" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">the real method runs</text>
+    <text x="558" y="180" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">pool caps at about 16 threads</text>
+
+    <path fill="none" d="M182 107 L250 107" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M242 101 L250 107 L242 113" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path fill="none" d="M410 107 L478 107" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M470 101 L478 107 L470 113" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <path fill="none" d="M478 210 L182 210" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M190 204 L182 210 L190 216" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="330" y="204" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">reply parcel, same path back</text>
+
+    <rect x="22" y="228" width="160" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="102" y="247" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">your thread resumes</text>
+    <text x="330" y="247" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">oneway calls skip the wait</text>
+  </svg>
+</Diagram>
+
+Here is the limit. Each process gets about **1 MB** of space for these copies, and every request it is making at the same moment shares that space. Two megabytes can never fit. Seven hundred kilobytes might fit today and fail tomorrow, because something else was in flight. The official [`TransactionTooLargeException`](https://developer.android.com/reference/android/os/TransactionTooLargeException) page states the 1 MB figure and gives the real guidance: keep intent extras to a few kilobytes, and saved state under 50 KB.
+
+Saved state from lesson 1 crosses the same way, to the same place. That is why a `Bundle` has a size limit, and why it is the same limit everywhere.
+
+### Fixing it, step by step
+
+#### Step 1: shrink it and watch the limit move
+
+Change `2_000_000` to `200_000`. Run it.
+
+**What you should see:** no crash.
+
+**Why:** 200 KB fits. It is still far above the "few kilobytes" the docs recommend, and it still shares space with everything else. This is a demonstration, not a fix.
+
+#### Step 2: send a key, not the data
+
+Keep the data in your own process and send only a short id:
+
+```kotlin
+// Payloads.kt
+object Payloads {
+    private val store = mutableMapOf<String, ByteArray>()
+    fun put(id: String, bytes: ByteArray) { store[id] = bytes }
+    fun get(id: String): ByteArray? = store[id]
+}
+
+// MainActivity.kt
+Payloads.put("article-42", ByteArray(2_000_000))
+startActivity(Intent(this, DetailActivity::class.java).putExtra("payloadId", "article-42"))
+
+// DetailActivity.kt
+val bytes = Payloads.get(intent.getStringExtra("payloadId")!!)
+```
+
+**What you should see:** the detail screen opens with all two megabytes available.
+
+**Why:** only a short string crossed to `system_server`. Both Activities live in the same process, so the data never had to move.
+
+<Callout kind="warn" title="You already know the hole in this fix">
+`Payloads` is an object in memory. Lesson 1 showed what happens to objects in memory: press Home on the detail screen, run `am kill`, come back, and `Payloads.get` returns null. Passing an id is the right pattern. Where the data waits for you is a chapter 5 and chapter 15 question. This shortcut is deliberate, and you will replace it later.
+</Callout>
+
+### When it breaks
+
+**The crash happens when the user leaves, not when they tap.** Same exception, with `onSaveInstanceState` in the stack, and often this line in logcat:
+
+```
+!!! FAILED BINDER TRANSACTION !!!  (parcel size = 2000xxx)
+```
+
+Something large was put in saved state, and saved state is sent to `system_server` when the screen stops. Save an id and reload the data (chapter 5).
+
+**Works for weeks, then crashes on one screen.** The data was small in testing and grew with real users. Never put a list of model objects into an intent or saved state.
+
+**An ANR whose top frame is `android.os.BinderProxy.transactNative`.** Your code is not slow. It is waiting for `system_server`, which is busy. Chapter 12 covers what to do.
+
+### Try it yourself
+
+Before you run it: put the two-megabyte array into saved state instead of an intent.
+
+```kotlin
+val payload by rememberSaveable { mutableStateOf(ByteArray(2_000_000)) }
+```
+
+Predict: does it crash when the screen appears, when you tap something, or at some other moment?
+
+**Answer:** at some other moment. The screen appears fine, because `rememberSaveable` only holds the value. Press Home or rotate and it crashes, because that is when the saved state is copied to `system_server`. The failure happens wherever the bytes cross, not where you created them.
+
+### Words you met
+
+**`system_server`**: the one system process that runs Android's core services, including the one that opens and closes your screens. [Platform architecture](https://developer.android.com/guide/platform)
+
+**Binder**: the part of Android that copies a request from one process to another and brings the answer back. [Binder overview](https://source.android.com/docs/core/architecture/ipc/binder-overview)
+
+**`TransactionTooLargeException`**: the error when a request does not fit in your process's 1 MB of shared Binder space. [Reference](https://developer.android.com/reference/android/os/TransactionTooLargeException)
+
+<Callout kind="note" title="Go deeper (optional)">
+Every "manager" the framework hands you works this way. `ActivityManager`, `WindowManager`, `PackageManager` and `NotificationManager` are all small local objects that forward your calls to `system_server` over Binder; putting your window on the screen is done by yet another process, `SurfaceFlinger` (chapter 8). So when a framework call surprises you, ask: *which process does this run in?* If the answer is "not mine", it can be slow, it can fail for reasons you did not cause, it has a size limit, and the answer was true when it was copied rather than now. That one question resolves a large share of Android confusion, and chapters 12 and 11 lean on it.
+</Callout>
+
+### Where this goes next
+
+Everything so far happened while the app was running. The next lesson goes back to the build, where a different "it worked before" hides.
+
+## Process priority &amp; the OOM killer
+
+Start with the mechanism, because everything else is downstream of it.
+
+Android runs on Linux with limited RAM and no swap. When memory runs low something must die, and the kernel's low-memory killer picks by **`oom_adj`** — a score the system assigns each process. Higher score, killed sooner.
+
+`system_server` (ch. 2) sets that score from what your app is currently doing:
+
+| Bucket | Your app | Killed |
+|---|---|---|
+| Foreground | a visible Activity, or a foreground service | almost never |
+| Visible | visible but not focused — split screen (ch. 5) | rarely |
+| Service | a running background service | when memory is tight |
+| Cached | nothing running; kept in case the user returns | **first, freely, silently** |
+| Empty | no components at all | immediately |
+
+**Priority is earned, not requested.** There is no API to say "please keep me". You move up the ladder by doing something the user can see — showing a screen, posting a foreground-service notification. That is the entire contract, and it is why the platform's answer to "how do I keep running" is always "show the user something".
+
+<Diagram
+  caption="The ladder. Your bucket is assigned from what the user can see, and the kernel kills from the bottom up — so priority is earned by being visible, never requested."
+  label="Priority ladder diagram: foreground processes with a visible activity or foreground service are almost never killed, visible processes rarely, service processes when memory is tight, and cached processes are killed first and silently. Moving up the ladder requires showing the user something."
+>
+  <svg viewBox="0 0 660 274" width="660" height="274">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">SAFEST</text>
+    <rect x="12" y="26" width="392" height="38" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="26" y="44" font-family="var(--font-mono)" font-size="11" fill="var(--dg-ok)">FOREGROUND</text>
+    <text x="26" y="58" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">a visible Activity, or a foreground service with its notification</text>
+
+    <rect x="12" y="70" width="392" height="38" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="26" y="88" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">VISIBLE</text>
+    <text x="26" y="102" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">visible but not focused — split screen, behind a dialog (ch. 5)</text>
+
+    <rect x="12" y="114" width="392" height="38" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="26" y="132" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">SERVICE</text>
+    <text x="26" y="146" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">a background service running — killed when memory is tight</text>
+
+    <rect x="12" y="158" width="392" height="38" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="26" y="176" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">CACHED</text>
+    <text x="26" y="190" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">nothing running; kept in case the user returns — killed freely, silently</text>
+
+    <rect x="12" y="202" width="392" height="34" rx="7" fill="var(--dg-fill)" stroke="var(--dg-warn)" stroke-dasharray="4 3"/>
+    <text x="26" y="224" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">EMPTY — killed immediately</text>
+    <text x="12" y="252" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">KILLED FIRST</text>
+
+    <path d="M424 236 L424 40" fill="none" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <path d="M418 48 L424 40 L430 48" fill="none" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="440" y="96" font-family="var(--font-ui)" font-size="11" fill="var(--dg-accent)">You move UP only by</text>
+    <text x="440" y="112" font-family="var(--font-ui)" font-size="11" fill="var(--dg-accent)">showing the user</text>
+    <text x="440" y="128" font-family="var(--font-ui)" font-size="11" fill="var(--dg-accent)">something.</text>
+    <text x="440" y="158" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">There is no API to ask</text>
+    <text x="440" y="174" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">for a better bucket.</text>
+    <text x="440" y="204" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">Most apps spend most</text>
+    <text x="440" y="220" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">of their life cached —</text>
+    <text x="440" y="236" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">that is ch. 5 in action.</text>
+  </svg>
+</Diagram>
+
+The cached bucket is where most apps spend most of their life, and being killed from it is **normal, not an error**. Chapter 5's process death is this bucket in action.

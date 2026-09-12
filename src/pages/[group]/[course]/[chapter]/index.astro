@@ -1,0 +1,91 @@
+---
+/**
+ * Chapter page: what the chapter proves, its lessons, and the round of
+ * interview questions that mixes them.
+ */
+import { getCollection, render } from 'astro:content';
+import Base from '../../../../layouts/Base.astro';
+import { getGroup } from '../../../../data/groups';
+import { chapterParts, courseHref, courseSlug, lessonHref, lessonParts } from '../../../../lib/courses';
+
+export async function getStaticPaths() {
+  const courses = await getCollection('courses');
+  const chapters = await getCollection('chapters');
+  const lessons = await getCollection('lessons');
+
+  return chapters.flatMap((chapter) => {
+    const { course: courseId, chapter: seg } = chapterParts(chapter.id);
+    const course = courses.find((item) => item.id === courseId);
+    if (!course) return [];
+    const group = course.data.group;
+    return [{
+      params: { group, course: courseSlug(courseId, group), chapter: seg.slug },
+      props: {
+        chapter,
+        course,
+        order: seg.order,
+        lessons: lessons
+          .filter((item) => lessonParts(item.id).course === courseId && item.data.chapter === seg.order)
+          .sort((a, b) => a.data.lesson - b.data.lesson),
+      },
+    }];
+  });
+}
+
+const { chapter, course, order, lessons } = Astro.props;
+const groupId = course.data.group;
+const group = getGroup(groupId);
+const { Content } = await render(chapter);
+const minutes = lessons.reduce((sum, item) => sum + item.data.minutes, 0);
+---
+
+<Base title={chapter.data.title} description={chapter.data.proves} group={groupId} nav="group">
+  <div class="page">
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/">Home</a><span aria-hidden="true">/</span>
+      <a href={`/${groupId}/`}>{group.title}</a><span aria-hidden="true">/</span>
+      <a href={courseHref(course.id, groupId)}>{course.data.navTitle ?? course.data.title}</a><span aria-hidden="true">/</span>
+      <span aria-current="page">Chapter {order}</span>
+    </nav>
+
+    <div class="grid">
+      <header class="card">
+        <div class="card-head" data-tint="accent">
+          <span>Chapter {order}</span>
+          <span class="num">{lessons.length} lessons · {minutes} min</span>
+        </div>
+        <div class="card-body">
+          <h1 class="chapter-title">{chapter.data.title}</h1>
+          <p class="chapter-proves">{chapter.data.proves}</p>
+        </div>
+      </header>
+
+      <section class="card">
+        <div class="card-head"><span>Lessons</span></div>
+        <div class="row-list lesson-rows">
+          {lessons.map((item) => (
+            <a href={lessonHref(item.id, groupId)}>
+              <span class="faint num">{item.data.chapter}.{item.data.lesson}</span>
+              <span class="row-title">
+                {item.data.title}
+                <span class="row-motto">{item.data.motto}</span>
+              </span>
+              <span class="row-meta num">{item.data.minutes} min</span>
+            </a>
+          ))}
+        </div>
+      </section>
+
+      <section class="card reading">
+        <div class="prose"><Content /></div>
+      </section>
+    </div>
+  </div>
+</Base>
+
+<style>
+  .chapter-title { font-size: var(--text-3xl); margin: 0 0 var(--space-3); }
+  .chapter-proves { color: var(--ink-2); font-size: var(--text-read); line-height: var(--leading-read); max-width: var(--measure); }
+  .lesson-rows > a { grid-template-columns: 2.4rem minmax(0, 1fr) auto; align-items: baseline; }
+  .row-motto { color: var(--ink-3); display: block; font-size: var(--text-sm); font-weight: var(--weight-regular); margin-top: 2px; }
+</style>

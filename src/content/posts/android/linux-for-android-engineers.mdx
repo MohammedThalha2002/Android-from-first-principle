@@ -1,0 +1,580 @@
+---
+title: "Linux for Android Engineers"
+navTitle: "Linux"
+summary: "Your app is a Linux process, owned by a Linux user, with one thread that matters, copied from a template, and killed by a signal. Five things you can see with adb in an hour, and every later chapter leans on them."
+readingTime: "1-2 hours"
+minutes: 75
+tags: ["process", "pid", "ps", "sandbox", "uid", "run-as", "thread", "main thread", "anr", "fork", "zygote", "copy-on-write", "signal", "sigkill", "am kill", "onDestroy"]
+draft: true
+date: "2026-04-04"
+subtopic: "android-internals"
+subtopicOrder: 1
+part: "I"
+verifiedAgainst: "compileSdk 36 · AGP 8.13 · Kotlin 2.3 · platform-tools 36"
+stage: "draft"
+labModule: ":ch01-linux"
+---
+
+Android is Linux with an opinionated layer on top. That sentence is repeated so often that it has stopped meaning anything, so this chapter makes it concrete: five things you can see about your own app with `adb`, each one a plain Linux fact, and each one the reason for something that will otherwise look arbitrary later.
+
+Your app is a **process**, and the process is not your app (lesson 1). It runs as its own Linux **user**, which is the whole security model (lesson 2). It has many **threads**, and one of them is special (lesson 3). It was **forked** from a template, not started fresh (lesson 4). And when the system is done with it, it sends a **signal** and none of your code runs (lesson 5).
+
+You do not need to know Linux. Each lesson defines what it uses, and each one ends with the chapter that depends on it.
+
+**Before you start.** Every lesson uses `adb`, the command-line tool that talks to a connected phone or emulator. Check it works:
+
+```bash
+adb devices
+```
+
+You should see one line with a serial number and the word `device`. If you see nothing, or `unauthorized`, appendix C has the fix. The examples use the package `dev.firstprinciples.android`, the app this blog builds. Substitute your own.
+
+## Your app is a process
+
+**You will:** find your app running on the device, read its process id, kill it, and watch it come back with a different one.
+**You need:** any debuggable app installed and open, and `adb`.
+**Time:** about 10 minutes.
+**Built with:** platform-tools 36.
+
+### The problem you can see
+
+With your app open:
+
+```bash
+adb shell ps -A -o PID,PPID,USER,NAME | grep firstprinciples
+```
+
+```
+ 9871  1284 u0_a412  dev.firstprinciples.android
+```
+
+Now press Home, then:
+
+```bash
+adb shell am kill dev.firstprinciples.android
+adb shell ps -A -o PID,PPID,USER,NAME | grep firstprinciples
+```
+
+The second command prints nothing. Open the app again from the launcher and run the `ps` line once more:
+
+```
+10203  1284 u0_a412  dev.firstprinciples.android
+```
+
+Same app, same icon, same screen. Different number in the first column. Whatever that number identifies, it is not your app.
+
+### What is actually happening
+
+A **process** is the operating system's box for one running program. Everything your app has in memory lives inside it: every object, every `companion object`, every singleton, every coroutine. The operating system gives each process a number, the **process id** or PID, and that number identifies the box, not the program in it.
+
+`ps` lists the processes the kernel is running right now. Your app appears because, to the kernel, it is a program like any other. The `-A` shows every process, and `-o` picks the columns. You will use the other columns in the next three lessons.
+
+`am kill` asks Android to destroy your app's process. When you opened the app again, Android made a **new** process, with a new PID, and put your screen back in it. Your app is not the process. Your app is what Android chooses to run inside whichever process it has given you right now, and it changes its mind whenever it wants memory back. Chapter 5 is about what survives that and what does not. This lesson only needs you to have seen the number change.
+
+The official [Processes and threads overview](https://developer.android.com/guide/components/processes-and-threads) says the same thing in its first paragraph: "the Android system starts a new Linux process for the application".
+
+### Seeing it, step by step
+
+#### Step 1: find the process
+
+```bash
+adb shell ps -A -o PID,PPID,USER,NAME | grep firstprinciples
+```
+
+**What you should see:** one line. The first column is the PID. If you see nothing, the app is not running; open it.
+
+#### Step 2: kill it
+
+Press Home first, then:
+
+```bash
+adb shell am kill dev.firstprinciples.android
+```
+
+**What you should see:** nothing printed. Run step 1 again: no line.
+
+**Why:** `am kill` only kills apps that are in the background, which is why you pressed Home. Android does not kill the app the user is looking at.
+
+#### Step 3: come back
+
+Open the app from the launcher. Run step 1 again.
+
+**What you should see:** a line with a different PID.
+
+### When it breaks
+
+**`ps` shows two lines for your app.** One of them has a colon in the name, like `dev.firstprinciples.android:sync`. That is a second process your app or a library declared in the manifest. It has its own PID and its own memory, and nothing in one is visible to the other. Chapter 6 covers when that is deliberate.
+
+**`am kill` does nothing.** The app was still in the foreground. Press Home and try again.
+
+**The PID did not change.** The process was never killed, usually because the app was still visible (split screen, picture-in-picture). Check with step 1 before opening the app again.
+
+### Try it yourself
+
+Before you run it: press Home, wait ten seconds, and run the `ps` line *without* running `am kill`. Predict whether your app's line is still there.
+
+**Answer:** almost always yes. Android keeps a backgrounded process alive as long as it has spare memory, so the next start is fast. The kill in step 2 is what the system does when memory runs short, not what it does every time you press Home. That is why the bug this causes is hard to reproduce, and why `am kill` exists.
+
+### Words you met
+
+**Process**: the operating system's box for one running program and everything it holds in memory. [Processes and threads overview](https://developer.android.com/guide/components/processes-and-threads)
+
+**PID**: the number the kernel gives a process. It identifies the box, not the app.
+
+**`ps`**: lists running processes. `-A` for all, `-o` to choose columns. [Android Debug Bridge](https://developer.android.com/tools/adb)
+
+**`am kill`**: asks Android to kill your app's backgrounded process the way it would under memory pressure. [Android Debug Bridge](https://developer.android.com/tools/adb)
+
+<Callout kind="note" title="Go deeper (optional)">
+Everything `ps` printed came from `/proc`, a directory the kernel fills with one folder per process. `adb shell cat /proc/<pid>/status` shows the same facts as text: `Pid`, `PPid`, `Uid`, `Threads`, and the memory the process is using (`VmRSS`). The `Name` line is cut to fifteen characters, so it reads `dev.firstprinci`, which is the kernel's limit and not a bug. `[verify on device]` The tools in chapter 11 read the same directory. [proc_pid_status(5)](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html)
+
+One more thing lives in that folder: `/proc/<pid>/fd`, the process's open files, each known by a small number called a **file descriptor**. Think of a hotel room number: once you have it, you say "room 205" instead of "third floor, turn right, fifth door". A process refers to an open file, socket or device by its number instead of its path, and there is a limit on how many it may hold open at once. Chapter 3 depends on this: the Binder driver your app talks to is one of those open files, `/dev/binder`.
+</Callout>
+
+### Where this goes next
+
+The third column of that `ps` line was `u0_a412`. That is a Linux user, and the next lesson shows what it stops.
+
+## One Linux user per app
+
+**You will:** see your app running as its own Linux user, and watch the system refuse to let anyone else read its files.
+**You need:** a debuggable build installed, and `adb`.
+**Time:** about 10 minutes.
+**Built with:** platform-tools 36.
+
+### The problem you can see
+
+```bash
+adb shell ls /data/data/dev.firstprinciples.android
+```
+
+```
+ls: /data/data/dev.firstprinciples.android: Permission denied
+```
+
+```bash
+adb shell run-as dev.firstprinciples.android ls
+```
+
+```
+cache
+code_cache
+files
+```
+
+Same files, same device, same you. One command is refused and one is not.
+
+### What is actually happening
+
+First, who is enforcing anything. Your app cannot touch the storage chip, the radio or another app's memory directly. Every one of those goes through the **kernel**, the one privileged program that owns the hardware, and the only way in is a **system call**: your process asks, the kernel decides. If that boundary did not exist, any chat app could delete your files or turn off the phone. Everything in this lesson is the kernel saying no.
+
+Linux keeps files private by giving every file an owner, and every process runs as some **user**. When your app is installed, Android creates a new Linux user for it, numbered from 10000 upward, and gives that user a private folder that nobody else can open. Your process runs as that user. That is the `u0_a412` in lesson 1: user 0 (the phone's primary account), app 412, so Linux user 10412.
+
+The `adb shell` runs as a different user, called `shell`, so the kernel refuses it. Another app is another user, so the kernel refuses that too. That is the whole **app sandbox**: one Linux user per app, enforced by the kernel with ordinary file permissions. No code in your app can change it, and no code in another app can get around it. [Application Sandbox](https://source.android.com/docs/security/app-sandbox) on the AOSP site is the primary description.
+
+`run-as` works because it switches to your app's user before running the command, and it only agrees to do that for apps built with `debuggable` on. The sandbox does not make an exception for a release build, even for you.
+
+Think of a shared Linux server where every app has a home directory and nobody has `sudo`. The analogy stops there: on a server, users log in and start their own programs. On Android, the user never logs in. The operating system starts and stops the user's processes, which is what lesson 1 showed.
+
+### Seeing it, step by step
+
+#### Step 1: read the user from the package manager
+
+```bash
+adb shell dumpsys package dev.firstprinciples.android | grep userId
+```
+
+**What you should see:** `userId=10412`, matching `a412` from lesson 1's `ps` line. `dumpsys` asks a system service to print its state; the package manager is the one that installed your app and picked this number.
+
+#### Step 2: look at the wall from the inside
+
+```bash
+adb shell run-as dev.firstprinciples.android ls -la
+```
+
+**What you should see:** lines like
+
+```
+drwx------  2 u0_a412 u0_a412  ... files
+```
+
+`drwx------` means the owner can read, write and enter, and nobody else can do anything. That mode has been the default for app data directories since Android 7.0 <ApiLevel changedIn="24" />. `/data/data/<package>` is a link to `/data/user/0/<package>`; you will see both paths and they mean the same thing.
+
+### When it breaks
+
+**`run-as: package not debuggable: dev.firstprinciples.android`.** You are pointing at a release build. Install the debug build.
+
+**Personal and work copies of your app cannot see each other's data.** A work profile is a separate Android user, so its apps get ids like `u10_a412`. Two different Linux users, by design.
+
+**A file another app "shared" with you cannot be opened.** Sharing a path does not share the permission. Chapter 6 covers `FileProvider`, which grants access to one file for one recipient without making anything world-readable.
+
+### Try it yourself
+
+Before you run it: if app A tries to read a file inside app B's folder from *inside its own code*, what happens? Install a second debuggable build (an `applicationIdSuffix` of `.second` is enough) and from app A run:
+
+```kotlin
+File("/data/data/dev.firstprinciples.android.second/files/anything").readText()
+```
+
+**Answer:**
+
+```
+java.io.FileNotFoundException: /data/data/dev.firstprinciples.android.second/files/anything: open failed: EACCES (Permission denied)
+```
+
+`EACCES` is Linux for "not allowed". The Java exception is a wrapper around a decision the kernel made.
+
+### Words you met
+
+**Linux user (UID)**: the identity your process runs as, one per installed app, numbered from 10000. [`Process.FIRST_APPLICATION_UID`](https://developer.android.com/reference/android/os/Process)
+
+**Kernel and system call**: the kernel is the privileged program that owns the hardware; a system call is how your process asks it for anything. [Platform architecture](https://developer.android.com/guide/platform)
+
+**App sandbox**: the private folder and process that identity owns, which no other app can reach. [Application Sandbox](https://source.android.com/docs/security/app-sandbox)
+
+**`run-as`**: runs a shell command as your app's user, for debuggable builds only. [Android Debug Bridge](https://developer.android.com/tools/adb)
+
+<Callout kind="note" title="Go deeper (optional)">
+There is a second wall behind the first. **SELinux** <ApiLevel min="21" /> is a policy layer in the kernel that decides which *kinds* of action each *kind* of process may take, regardless of who owns a file. Your app runs in a domain called `untrusted_app`, and a refusal shows in logcat as a line beginning `avc: denied`. It is why your app cannot execute a program it downloaded into its own folder. Chapter 10 uses it. [Security-Enhanced Linux in Android](https://source.android.com/docs/security/features/selinux)
+</Callout>
+
+### Where this goes next
+
+Chapter 10 builds the permission system on top of this user. The next lesson goes inside the process: it is not one thing running, it is many, and one of them can freeze your screen.
+
+## Threads, and why one is special
+
+**You will:** list the threads inside your app's process, then freeze the one that draws the screen and see what the system does about it.
+**You need:** a Compose screen with a button you can edit, and `adb`.
+**Time:** about 15 minutes.
+**Built with:** compileSdk 36, AGP 8.13, Kotlin 2.3.
+
+### The problem you can see
+
+Put a five-second sleep in a button:
+
+```kotlin
+// MainActivity.kt
+Button(onClick = { Thread.sleep(8_000) }) { Text("Freeze") }
+```
+
+Run it. Tap the button, then tap anywhere else on the screen a second later.
+
+Nothing moves. No ripple on the second tap, no scroll, no animation. After about five seconds the system puts up a dialog: **"dev.firstprinciples.android isn't responding"**, with the options to wait or close the app. In logcat:
+
+```
+ActivityManager: ANR in dev.firstprinciples.android (dev.firstprinciples.android/.MainActivity)
+  Reason: Input dispatching timed out
+```
+
+One `Thread.sleep` froze everything. Not just the button: the whole screen, including the parts of it you never touched.
+
+### What is actually happening
+
+A process is a box; a **thread** is one line of execution running inside it. Your process has many. Some belong to you, some to the Android runtime, some to the framework. They share the process's memory, so any of them can touch any object.
+
+If the process is a restaurant, the threads are its staff. They share one kitchen (the heap, where every object lives) but each carries their own order pad (a stack, where that thread's local variables and call chain live). The analogy stops there: a member of staff can leave without closing the restaurant, and a thread can end without ending the process, but when the restaurant closes, everyone goes home at once. That second half is what lesson 5 is about.
+
+One of them is the **main thread**. Android creates it when the process starts, and it is the only thread allowed to touch the screen: every tap is delivered to it, every frame is drawn by it, every `onCreate` and every Composable runs on it. It is a queue with one worker. Your `onClick` ran on that worker, and `Thread.sleep` held it for eight seconds. Every tap and every frame during those eight seconds sat in the queue behind your sleep.
+
+The system watches that queue. When a tap has not been handled for five seconds, it declares an **ANR**, "Application Not Responding", and offers the user a way out. The [ANRs](https://developer.android.com/topic/performance/vitals/anr) page lists the exact triggers; the five-second input timeout is the one you just hit.
+
+Why does Android do it this way, one thread and no locks? Because a screen is mutable state, and letting many threads change it at once would need a lock around every read and write. One thread means no locks and no deadlocks, at the price that this one thread must never wait for anything. Chapter 4 explains the queue and its 16.6 ms deadline; chapter 12 explains coroutines, which are how you do slow work without holding it.
+
+### Seeing it, step by step
+
+#### Step 1: list the threads
+
+With the app open, find its PID with lesson 1's command, then:
+
+```bash
+adb shell cat /proc/<pid>/task/*/comm
+```
+
+**What you should see:** one name per line. Some you can recognise:
+
+```
+dev.firstprinci
+Signal Catcher
+Jit thread pool
+FinalizerDaemon
+RenderThread
+binder:9871_1
+```
+
+The first line is the main thread; it carries the process name, cut to fifteen characters. `RenderThread` draws what the main thread decided, and chapter 4 is about the two of them. `binder:` threads receive calls from other processes (chapter 3). `Signal Catcher` waits for lesson 5. The exact list varies by device; expect twenty to forty names. `[capture on device]`
+
+#### Step 2: freeze the main thread
+
+Add the button above, run, tap it, tap elsewhere.
+
+**What you should see:** a frozen screen, then the "isn't responding" dialog after about five seconds, and the `ANR in` lines in logcat.
+
+**Why:** the sleep ran on the main thread because `onClick` always does. Your second tap could not be delivered until the sleep returned, and the system's five-second timer ran out first.
+
+#### Step 3: move the wait off the main thread
+
+Replace the sleep with the same wait on a different thread:
+
+```kotlin
+Button(onClick = { thread { Thread.sleep(8_000) } }) { Text("Freeze") }
+```
+
+**What you should see:** nothing freezes. Taps ripple, the screen scrolls, no dialog.
+
+**Why:** the eight-second wait now holds a thread nobody is waiting on. This is the whole idea behind every asynchronous API on Android, and chapter 12 replaces `thread { }` with the tool you will actually use.
+
+### When it breaks
+
+**An ANR in production whose stack trace is not your code.** The top of the main thread's stack is inside a framework call. Your code did not sleep; it called something that waited on another process. Chapter 3 explains why, chapter 11 shows how to read the trace.
+
+**No dialog appears, but the app is frozen.** The freeze was shorter than five seconds, or nothing was tapped during it. The system only declares an ANR when input is waiting. A four-second freeze is still four seconds of dropped frames; chapter 4 shows how to see those.
+
+**`thread { }` fixed the freeze and broke the screen update.** Touching UI from a background thread is not allowed. In Compose you get stale state; in Views you get `CalledFromWrongThreadException`. Chapter 12's dispatchers are how the result gets back to the main thread.
+
+### Try it yourself
+
+Before you run it: change `8_000` to `3_000` and tap the button once, without a second tap. Predict whether the dialog appears.
+
+**Answer:** no. The screen freezes for three seconds and recovers. The ANR timer starts when an input event is waiting; with no second tap there is nothing waiting, and three seconds is under the limit anyway. The freeze still happened. Users notice a freeze long before the system does.
+
+### Words you met
+
+**Thread**: one line of execution inside a process. A process has many, and they share its memory. [Processes and threads overview](https://developer.android.com/guide/components/processes-and-threads)
+
+**Main thread**: the one thread that delivers input and draws the screen. Anything that holds it freezes the app. [Processes and threads overview](https://developer.android.com/guide/components/processes-and-threads)
+
+**ANR**: "Application Not Responding", declared when the main thread has not handled an input event within five seconds. [ANRs](https://developer.android.com/topic/performance/vitals/anr)
+
+<Callout kind="note" title="Go deeper (optional)">
+Only one thread runs on each CPU core at a time; the kernel switches between them thousands of times a second, saving one thread's registers and restoring another's. That switch is not free: it flushes caches, and a hot path that hops between threads pays for it in dropped frames. This is why chapter 12 warns against wrapping small work in `withContext`, and why chapter 11 shows the switches in a trace. Your app's threads are visible one level down as `/proc/<pid>/task/<tid>`. [proc_pid_task(5)](https://www.man7.org/linux/man-pages/man5/proc_pid_task.5.html)
+</Callout>
+
+### Where this goes next
+
+Chapter 4 is this lesson's queue with a stopwatch on it. The next lesson asks where your process came from in the first place.
+
+## `fork()`, and what a copy shares
+
+**You will:** see that every app process on the device has the same parent, and explain why that makes starting an app cheap and resetting a static unavoidable.
+**You need:** `adb`, and the app open.
+**Time:** about 10 minutes.
+**Built with:** platform-tools 36.
+
+### The problem you can see
+
+Lesson 1's `ps` line had a second column, `PPID`. Look at it next to one more process:
+
+```bash
+adb shell ps -A -o PID,PPID,USER,NAME | grep -E "zygote|firstprinciples"
+```
+
+```
+ 1284     1 root     zygote64
+ 9871  1284 u0_a412  dev.firstprinciples.android
+```
+
+Your app's parent process is `zygote64`. Run the same line for any other app on the device and it has the same parent. Every app on the phone was created by one process that has been running since boot.
+
+### What is actually happening
+
+On Linux, a process is created by **fork**: an existing process asks the kernel for a copy of itself. The copy has a new PID and the same memory, the same open files, the same everything, and the original is recorded as its **parent**. That is the `PPID` column. [fork(2)](https://man7.org/linux/man-pages/man2/fork.2.html) is the primary source.
+
+The copy is cheap because of a trick called **copy-on-write**. The kernel does not duplicate the memory. It lets both processes share the same pages, and only copies a page when one of them writes to it. A forked child that reads a lot and writes a little costs almost nothing.
+
+Android uses this on purpose. Starting a language runtime is slow: thousands of framework classes to load and check. So Android does it once, at boot, in a process called **Zygote**, which loads the runtime and the framework and then waits. When you tap an icon, the system asks Zygote to fork. Your process starts as a copy of a fully warmed-up runtime, and because of copy-on-write, the hundred apps on a phone share one copy of the framework in memory.
+
+Here is the consequence you will meet in chapter 2. The copy contains the *framework's* state. It contains nothing of yours. Your classes load after the fork, inside the new process, so every `companion object`, every `object` singleton and every top-level `val` starts from scratch in every new process. When lesson 1 killed your app and Android forked a new one, everything static in your app was rebuilt, while the framework arrived pre-loaded. Chapter 2 makes that visible with two counters on one screen.
+
+### Seeing it, step by step
+
+#### Step 1: find the parent
+
+```bash
+adb shell ps -A -o PID,PPID,USER,NAME | grep -E "zygote|firstprinciples"
+```
+
+**What you should see:** `zygote64` (and on most devices a 32-bit `zygote` too), and your app with a `PPID` equal to `zygote64`'s PID.
+
+#### Step 2: check another app
+
+```bash
+adb shell ps -A -o PID,PPID,USER,NAME | grep -E "zygote|com.android.settings"
+```
+
+**What you should see:** Settings has the same parent. So does every app.
+
+**Why:** there is one Zygote and every app process is a fork of it. `zygote64` itself has parent 1, `init`, the first process the kernel starts.
+
+### When it breaks
+
+**A static that is sometimes set and sometimes not.** Your code assumed "the app has been running, so this was initialised". After a kill and a fresh fork, the static is new. Chapter 2 shows the exact symptom and chapter 5 shows what to keep instead.
+
+**The parent is not Zygote.** Some apps declare an isolated process (`android:isolatedProcess`) or run under a different template. Rare, and always deliberate.
+
+### Try it yourself
+
+Before you run it: kill your app (lesson 1, step 2), reopen it, and run step 1 again. Predict the `PPID`.
+
+**Answer:** the same Zygote PID as before. The child changed; the parent did not. Zygote has been running since boot and will keep forking apps until the phone restarts.
+
+### Words you met
+
+**Fork**: the Linux operation that creates a process as a copy of an existing one. [fork(2)](https://man7.org/linux/man-pages/man2/fork.2.html)
+
+**Parent process (PPID)**: the process a fork copied from.
+
+**Copy-on-write**: sharing memory pages between parent and child until one of them writes, which makes a fork cheap.
+
+**Zygote**: the process Android boots once, warms up with the framework, and forks to create every app process. [`ZygoteInit.java`](https://cs.android.com/android/platform/superproject/+/master:frameworks/base/core/java/com/android/internal/os/ZygoteInit.java)
+
+<Callout kind="note" title="Go deeper (optional)">
+Most Linux programs fork and then immediately replace the copy with a new program (`exec`). Android does not. Zygote forks and never execs, because the whole point is to keep the pre-loaded framework in the copy. Your app's code is loaded into that copy afterwards from `classes.dex`, which chapter 2 covers. Chapter 2 also explains how Zygote knows what to preload: a list at `/system/etc/preloaded-classes`.
+</Callout>
+
+### Where this goes next
+
+Chapter 2 opens with the static that resets. The last lesson here is about how the process ends.
+
+## Signals: how a process is told to stop
+
+**You will:** prove that when Android kills your process, `onDestroy` does not run, and name the two signals behind process death and the ANR dialog.
+**You need:** a Compose screen you can edit, and `adb`.
+**Time:** about 10 minutes.
+**Built with:** compileSdk 36, AGP 8.13, Kotlin 2.3.
+
+### The problem you can see
+
+Log the two callbacks people rely on for cleanup:
+
+```kotlin
+// MainActivity.kt
+override fun onStop() {
+    super.onStop()
+    Log.d("Lifecycle", "onStop")
+}
+
+override fun onDestroy() {
+    super.onDestroy()
+    Log.d("Lifecycle", "onDestroy")
+}
+```
+
+Run it. Press Home. Then kill the process and read the log:
+
+```bash
+adb shell am kill dev.firstprinciples.android
+adb logcat -d -s Lifecycle
+```
+
+```
+D Lifecycle: onStop
+```
+
+`onStop` ran when you pressed Home. `onDestroy` never ran. The process is gone and your cleanup code did not execute.
+
+### What is actually happening
+
+The kernel tells a process about events by sending it a **signal**, a small numbered message. It carries no data, only the number: a signal is a notification, and chapter 3's Binder is how data moves. A process can install a handler for most signals and run code when one arrives. Two of them cannot be handled, and one of those is **`SIGKILL`**, signal 9. When a process receives it, the kernel ends the process immediately. No handler, no cleanup, no last line of code. [signal(7)](https://man7.org/linux/man-pages/man7/signal.7.html) lists them all.
+
+`am kill` sends `SIGKILL`. So does the system when it wants memory back. That is why `onDestroy` did not run, and why nothing you put in `onDestroy` can be relied on: it runs when your Activity is destroyed *inside a living process*, which is what happens on rotation. It does not run when the process itself is destroyed, which is what happens under memory pressure. The rule chapter 5 builds on this: **`onStop` is the last callback you are promised.** Anything that must be saved is saved by then.
+
+The second signal you have already met. In lesson 3, when the main thread was frozen, the system sent your process **`SIGQUIT`**, signal 3. The Android runtime installs a handler for it on a dedicated thread, the `Signal Catcher` you saw in the thread list, whose job is to write down what every thread was doing at that moment. That record is the ANR trace, and it is how the system can report the main thread's stack even though the main thread is stuck: a different thread wrote it. Chapter 11 is about reading that trace.
+
+### Seeing it, step by step
+
+#### Step 1: log the callbacks
+
+Add the two overrides above. Run the app.
+
+#### Step 2: press Home, then kill
+
+```bash
+adb shell am kill dev.firstprinciples.android
+adb logcat -d -s Lifecycle
+```
+
+**What you should see:** `onStop` only.
+
+**Why:** Home moved the Activity to the background, which is a normal lifecycle transition, so `onStop` ran. `am kill` sent `SIGKILL`, which ends the process before any code runs.
+
+#### Step 3: compare with rotation
+
+Clear the log, reopen the app, and rotate the device:
+
+```bash
+adb logcat -c
+# rotate
+adb logcat -d -s Lifecycle
+```
+
+**What you should see:** `onStop` then `onDestroy`.
+
+**Why:** rotation destroys the Activity object inside a process that keeps running. The Activity's lifecycle completed. In step 2 the process did not survive long enough for it to.
+
+### When it breaks
+
+**"I close the database in `onDestroy` and it is sometimes corrupt."** `onDestroy` did not run; the process was killed. Anything that must be flushed is flushed in `onStop` or earlier. Chapter 15 covers what SQLite does about this on its own.
+
+**"I unregister a listener in `onDestroy` and it leaks."** Same cause, different symptom, when the leak is across a rotation rather than a kill. Register in `onStart`, unregister in `onStop`; chapter 5 gives the pairing rule.
+
+**A `finally` block that did not run.** `finally` runs when a method exits. `SIGKILL` does not exit methods; it ends the process mid-instruction.
+
+### Try it yourself
+
+Before you run it: repeat step 2 with `am force-stop` instead of `am kill`. Predict the log.
+
+**Answer:** the same, `onStop` only. Both commands end the process with `SIGKILL`. The difference is what Android does *before* sending it: `force-stop` also throws away the saved state and stops the app receiving anything until the user opens it again. The signal is the same; the bookkeeping around it differs, and chapter 5 needs that distinction.
+
+### Words you met
+
+**Signal**: a numbered message the kernel sends a process; most can be handled with code, two cannot. [signal(7)](https://man7.org/linux/man-pages/man7/signal.7.html)
+
+**`SIGKILL`**: signal 9, ends the process immediately with no code running. What `am kill` and the low-memory killer send.
+
+**`SIGQUIT`**: signal 3, which the Android runtime handles by writing every thread's stack. The mechanism behind the ANR trace.
+
+<Callout kind="note" title="Go deeper (optional)">
+You can send `SIGQUIT` yourself: `adb shell run-as dev.firstprinciples.android kill -3 <pid>` on a debuggable build. `[verify on device]` The runtime logs that it wrote the traces, but the file lands in `/data/anr/`, which is not readable without root on a normal device, and modern Android records the structured version in `ApplicationExitInfo` instead. Chapter 11 shows the supported way to get at both. The low-memory killer that sends `SIGKILL` in production is `lmkd`, and chapter 3 explains how it chooses its victims.
+</Callout>
+
+### Where this goes next
+
+Chapter 2 starts where this one ends: a fresh fork, a static that reset, and a runtime that gets faster the second time.
+
+## Cheat-sheet
+
+```bash
+adb devices                                                # is adb working
+
+# process (lesson 1)
+adb shell ps -A -o PID,PPID,USER,NAME | grep <package>     # PID, parent, Linux user
+adb shell am kill <package>                                # SIGKILL, keeps saved state
+adb shell am force-stop <package>                          # SIGKILL, discards saved state
+
+# sandbox (lesson 2)
+adb shell dumpsys package <package> | grep userId          # the numeric Linux user
+adb shell run-as <package> ls -la                          # inside the data dir; debuggable only
+
+# threads (lesson 3)
+adb shell cat /proc/<pid>/task/*/comm                      # thread names
+adb logcat -d | grep -A2 "ANR in"                          # was there an ANR, and why
+
+# parent (lesson 4)
+adb shell ps -A -o PID,PPID,USER,NAME | grep zygote        # the one parent of every app
+
+# signals (lesson 5)
+adb logcat -c ; adb logcat -d -s Lifecycle                 # which callbacks actually ran
+```
+
+| Linux fact | What it explains later |
+|---|---|
+| your app is a process the OS owns | process death and the three tiers of state (ch. 5) |
+| one Linux user per app | permissions, `FileProvider`, scoped storage (ch. 6, 10, 15) |
+| one main thread, no locks | the frame budget (ch. 4), coroutines (ch. 12), ANRs (ch. 11) |
+| every process is a fork of Zygote | statics reset, first run is slowest (ch. 2) |
+| `SIGKILL` runs no code | `onStop` is the last promise (ch. 5) |
+
+<LabCard module=":ch01-linux">
+Produce five pieces of evidence from the spine app, one per lesson: the `ps` line before and after `am kill` showing the PID change; the `run-as` listing and the `EACCES` exception from a second app; the thread list and the `ANR in` log lines; the `ps` line showing `zygote64` as the parent; and the logcat showing `onStop` without `onDestroy` after a kill. Keep them. Chapter 2 and chapter 5 ask you to reproduce three of them.
+</LabCard>

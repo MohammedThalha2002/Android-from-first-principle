@@ -1,0 +1,78 @@
+{
+  "lesson": "1.5",
+  "title": "User space, kernel space, and the only door between them",
+  "questions": [
+    {
+      "stage": "pre",
+      "question": "Your app has no permissions at all. What stops its code from reading the storage chip directly?",
+      "options": [
+        "Android's permission system refuses the call",
+        "The processor is in user mode, where those instructions and that memory are unavailable",
+        "The Java language does not allow hardware access",
+        "The storage chip is encrypted"
+      ],
+      "correct": 1,
+      "explanation": "Permissions are code, and code that could be bypassed would protect nothing. The separation is a processor feature: app code runs in a mode where most of the machine simply does not respond."
+    },
+    {
+      "stage": "check",
+      "question": "What happens when your app opens a file?",
+      "options": [
+        "The runtime reads the file directly from its own memory space",
+        "A system call switches the processor into kernel mode at an address the kernel chose",
+        "Android's framework reads it and copies the bytes into your process",
+        "The file is mapped into your address space and no kernel code runs"
+      ],
+      "correct": 1,
+      "explanation": "The entry point matters as much as the switch: the caller does not choose where it lands, so it cannot jump into the middle of kernel code. Everything outside your own memory works the same way."
+    },
+    {
+      "stage": "check",
+      "question": "You encrypt a file in your app's own internal directory. What does that protect against?",
+      "options": [
+        "Other apps reading it, which they otherwise could",
+        "Root access, always",
+        "The user uninstalling the app",
+        "Nothing extra against other apps; it depends on where the key lives for anything else"
+      ],
+      "correct": 3,
+      "explanation": "Other apps could never read it: the kernel refuses them on user id. Encryption only helps against someone who can already read the bytes, and then only if they cannot also read the key."
+    },
+    {
+      "stage": "check",
+      "question": "A StrictMode DiskReadViolation appears in your log. What is it telling you?",
+      "options": [
+        "The file is corrupt",
+        "Your app lacks a storage permission",
+        "You read from disk on the main thread, and every read crossed into the kernel and back",
+        "The read happened on a background thread, which is not allowed"
+      ],
+      "correct": 2,
+      "explanation": "It is a notice, not an error, and the operation succeeded. The point is that the thread which draws your frames spent that time waiting on a trip through kernel space."
+    },
+    {
+      "stage": "post",
+      "question": "Suppose Android allowed app code to run in kernel mode. What would be the deepest problem?",
+      "options": [
+        "Apps would use more battery",
+        "Every check in the system becomes advisory, because the code being checked could bypass the code doing the checking",
+        "Apps would need to be written in C",
+        "The kernel would run out of memory"
+      ],
+      "correct": 1,
+      "explanation": "Permissions, file ownership and process isolation are all enforced by code. If app code could reach that code, none of it would mean anything, which is why the separation is made by hardware rather than by software."
+    },
+    {
+      "stage": "post",
+      "question": "Your app calls a system service and gets a result from another process. What did that involve?",
+      "options": [
+        "A local method call inside your own process",
+        "A system call into the kernel, where a driver called Binder carried it to the other process",
+        "A network request to a system server on the device",
+        "Shared memory mapped into both processes with no kernel involvement"
+      ],
+      "correct": 1,
+      "explanation": "The manager object in your code is a stand-in, and the real work happens elsewhere. It uses the same door as a file read, which is why these calls have a cost and why chapter 4 cares how much you send through it."
+    }
+  ]
+}

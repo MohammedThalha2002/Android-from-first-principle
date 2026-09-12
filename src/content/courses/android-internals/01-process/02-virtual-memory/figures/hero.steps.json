@@ -1,0 +1,12 @@
+{
+  "title": "Two processes, two page tables, one memory chip",
+  "desc": "A drawing of two app processes using the same virtual address, each translated through its own page table by the memory management unit, landing on different physical pages.",
+  "steps": [
+    { "show": ["app-a"], "note": "Your app holds an object at an address. That number is not a place in memory." },
+    { "show": ["app-a", "mmu", "table-a"], "note": "On every access the MMU translates it, using the page table the kernel keeps for your process." },
+    { "show": ["app-a", "mmu", "table-a", "ram", "hit-a"], "note": "The table says which physical page that is. Your code never learns the answer." },
+    { "show": ["app-b", "table-b"], "note": "Another app has its own address space and its own table, written by the same kernel." },
+    { "show": ["app-b", "mmu", "table-b", "ram", "hit-b"], "note": "The very same virtual address, translated through that table, lands somewhere else entirely." },
+    { "show": ["table-a", "ram", "gap"], "note": "Your table has no entry reaching its pages. There is no number you could use. That is isolation." }
+  ]
+}

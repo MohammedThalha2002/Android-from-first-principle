@@ -1,0 +1,240 @@
+---
+title: "Adaptive UI, Design Systems & Accessibility"
+navTitle: "Adaptive UI & a11y"
+summary: "One UI for a phone, a folded tablet, 200 % font scale and a screen reader. Resources, Material roles, size classes, motion, accessibility, localisation, widgets."
+readingTime: "2 hours"
+minutes: 120
+tags: ["resource qualifiers","density","dp","sp","material 3","design tokens","dynamic color","dark theme","window size class","foldable","insets","edge-to-edge","animation","semantics","talkback","contentdescription","rtl","plurals","pseudolocale"]
+draft: true
+date: "2026-08-08"
+subtopic: "android-internals"
+subtopicOrder: 19
+part: "IV"
+verifiedAgainst: "compileSdk 36 · Compose BOM 2026.09 · Material 3"
+stage: "outline"
+labModule: ":ch19-adaptive"
+sources: ["09-design-systems-theming-and-accessibility#Resources as a resolution system","09-design-systems-theming-and-accessibility#Material 3 &amp; design tokens","09-design-systems-theming-and-accessibility#Dark theme","09-design-systems-theming-and-accessibility#Adaptive layout","09-design-systems-theming-and-accessibility#Motion","09-design-systems-theming-and-accessibility#Accessibility as a first-class requirement","09-design-systems-theming-and-accessibility#Localisation &amp; RTL","09-design-systems-theming-and-accessibility#Failure modes","09-design-systems-theming-and-accessibility#Cheat-sheet","20-platform-integrations-and-native-interop#Surfaces beyond the phone"]
+---
+One codebase has to serve a 5-inch phone and an unfolded tablet, a user at 100 % font scale and one at 200 %, someone reading Arabic, and someone who never sees the screen at all.
+
+The temptation is a branch per case. The platform's answer is better: **describe what you need, and let the system resolve it**. Resources resolve by configuration, layouts respond to size classes, and the semantics tree describes meaning independently of pixels. Get those three right and the matrix mostly collapses.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Resources as a resolution system
+
+`res/values/strings.xml` and `res/values-ar/strings.xml` are not two files you choose between. They are one **resource** with two candidates, and the system picks at lookup time using the device's current configuration.
+
+Qualifiers resolve in a fixed precedence: locale, then layout direction, then smallest width, then orientation, then density, and so on. A missing qualifier falls back to the default, which is why `values/` must always be complete — it is the safety net for every configuration you did not anticipate.
+
+<Diagram
+  caption="One resource, several candidates. The device configuration selects; anything unmatched falls back to the default, which is why the default folder must always be complete."
+  label="Resource resolution diagram: a single string resource has candidates in several qualified folders. The device configuration of Arabic, night mode and extra-high density selects the Arabic folder for strings and the night folder for colours, falling back to the unqualified default when no candidate matches."
+>
+  <svg viewBox="0 0 660 262" width="660" height="262">
+    <rect x="12" y="26" width="184" height="86" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="104" y="46" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">DEVICE CONFIGURATION</text>
+    <text x="104" y="66" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">locale = ar</text>
+    <text x="104" y="82" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">night mode = yes</text>
+    <text x="104" y="98" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">density = xxhdpi</text>
+
+    <text x="252" y="24" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">CANDIDATES, IN PRECEDENCE ORDER</text>
+    <rect x="248" y="32" width="230" height="24" rx="5" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="260" y="48" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">values-ar/strings.xml</text>
+    <rect x="248" y="60" width="230" height="24" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="260" y="76" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">values-fr/strings.xml</text>
+    <rect x="248" y="88" width="230" height="24" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="260" y="104" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">values-night/colors.xml</text>
+    <rect x="248" y="116" width="230" height="24" rx="5" fill="var(--dg-fill)" stroke="var(--dg-muted)" stroke-dasharray="4 3"/>
+    <text x="260" y="132" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">values/strings.xml</text>
+    <text x="484" y="132" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">the fallback</text>
+
+    <path d="M196 48 L248 44" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M240 39 L248 44 L241 50" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+
+    <rect x="248" y="170" width="230" height="40" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="363" y="195" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">the value your code gets</text>
+    <path d="M363 140 L363 170" fill="none" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <path d="M357 162 L363 170 L369 162" fill="none" stroke="var(--dg-accent)" stroke-width="1.5"/>
+
+    <text x="330" y="238" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">This is why a configuration change recreates the Activity (ch. 5): the answers change.</text>
+  </svg>
+</Diagram>
+
+**The density maths** is worth having exactly, because it is behind every "why is this the wrong size" question:
+
+```
+px = dp × (dpi / 160)
+```
+
+`dp` is a density-independent pixel: 1 dp is 1 px on a 160 dpi screen, 3 px at xxhdpi. Use `dp` for everything spatial. Use **`sp`** for text, and only for text — `sp` is `dp` scaled again by the user's font-size preference, so text set in `dp` silently ignores an accessibility setting the user deliberately changed.
+
+**Per-app language** <ApiLevel min="33" /> lets a user choose a language for your app alone, declared in `res/xml/locales_config.xml`. Two `Locale` traps worth knowing: `Locale.getDefault()` is the *formatting* locale, not necessarily your app's resource locale; and case conversion is locale-sensitive, so `"i".uppercase()` is `"İ"` in Turkish. Use `Locale.ROOT` for anything machine-readable.
+
+## Material 3 &amp; design tokens
+
+Material 3 is a set of **roles**, not colours. `primary`, `onPrimary`, `surface`, `onSurfaceVariant` — each says what a colour is *for*, and each `on*` role is guaranteed to be legible on its pair.
+
+That indirection is the whole value, and it is what lets **dynamic colour** work: on Android 12+ the system derives a scheme from the wallpaper, and your UI adapts because it never named a colour.
+
+The same indirection is how you build a design system that survives a rebrand:
+
+```kotlin
+// Semantic, not literal. A rebrand changes one file.
+val LocalTokens = staticCompositionLocalOf<Tokens> { error("No tokens") }
+data class Tokens(val surfaceDanger: Color, val spacingCard: Dp, val radiusCard: Dp)
+```
+
+The rule: **components consume semantic tokens; only the theme names a literal value.** A hex in a component is a rebrand you cannot do, and a screen you cannot re-theme for dark mode.
+
+## Dark theme
+
+Not an inversion. A second, deliberately designed palette.
+
+`isSystemInDarkTheme()` reports the setting; a proper implementation offers three states — system, light, dark — because a user who wants your app light on a dark phone should be able to say so.
+
+What actually breaks:
+
+- **Elevation.** In light, elevation is a shadow. On a dark surface a shadow is invisible, so Material 3 raises the surface *tone* instead. A hardcoded dark grey does not participate and looks flat.
+- **Images with baked-in backgrounds.** A logo on white sits in a white box on a dark screen. Ship a transparent asset, or a `-night` variant.
+- **Contrast in both directions.** A colour that clears contrast on white often fails on near-black. Both need checking; assuming one implies the other is the most common dark-theme accessibility bug.
+- **Forced dark** (`android:forceDarkAllowed`) is an automatic inversion for apps that have not implemented a dark theme. It is a migration aid, not a design.
+
+## Adaptive layout
+
+Not "phone or tablet" — a **window** size class, because a phone-sized window can exist on a tablet in split screen (ch. 5).
+
+| Class | Width | Typical layout |
+|---|---|---|
+| Compact | < 600 dp | one pane, bottom navigation |
+| Medium | 600–840 dp | list-detail or a supporting pane, navigation rail |
+| Expanded | ≥ 840 dp | two panes, rail or permanent drawer |
+
+The canonical patterns — list-detail, supporting pane, feed — exist because they cover most apps, and the adaptive libraries implement the awkward part: what "back" means when two panes merge into one. On a compact screen, back from detail returns to list; on expanded, both are visible and back should leave the screen entirely. Chapter 7 handles that.
+
+**Foldables** add posture: a device half-open with a hinge across the middle needs content on one side, not split by the fold. `WindowInfoTracker` reports the hinge position and state.
+
+Since Android 16 <ApiLevel changedIn="36" /> large-screen devices ignore orientation and resizability restrictions for most apps, so "portrait only" is no longer enforceable there. Designing for a resizable window is now the baseline rather than an enhancement.
+
+## Motion
+
+Compose offers a ladder; take the lowest rung that does the job.
+
+| API | For |
+|---|---|
+| `animate*AsState` | one value reacting to a state change |
+| `updateTransition` | several values driven by one state |
+| `AnimatedVisibility` / `AnimatedContent` | enter and exit, or swapping content |
+| `Animatable` | gesture-driven, interruptible |
+| `Animation` | full manual control; rarely needed |
+
+**Springs over tweens** for anything a user can interrupt. A spring has velocity, so a fling that reverses mid-flight continues naturally; a fixed-duration tween restarts and feels mechanical.
+
+Animate the cheap properties. Chapter 8's rule applies: `graphicsLayer`, alpha, translation and scale are RenderNode properties; animating size or layout re-runs measure every frame.
+
+**Respect the "remove animations" setting.** It is an accessibility setting for users who experience motion sickness, and honouring it is not optional:
+
+```kotlin
+val reduced = LocalAccessibilityManager.current?.let { /* check the setting */ } ?: false
+val spec = if (reduced) snap() else spring()
+```
+
+## Accessibility as a first-class requirement
+
+Compose builds a **semantics tree** in parallel with the UI tree. TalkBack reads it, and — as chapter 13 noted — your tests query the same tree, so testable and accessible are the same property.
+
+**What a screen reader needs:**
+
+```kotlin
+Icon(Icons.Default.Delete, contentDescription = "Delete article")   // meaning
+Icon(Icons.Default.Star, contentDescription = null)                 // decorative — say so
+Text("Results", modifier = Modifier.semantics { heading() })        // structure to navigate by
+```
+
+`contentDescription = null` is a deliberate statement that an element is decorative. Omitting it entirely on an interactive element leaves it unlabelled, which is the single most common failure.
+
+**Merging** matters: a card with a title, subtitle and icon should be *one* announcement, not three stops. `Modifier.semantics(mergeDescendants = true)` collapses it. `clearAndSetSemantics` replaces a subtree's semantics entirely, for a complex custom control.
+
+**The non-negotiables:**
+
+- Touch targets **at least 48 dp**, regardless of how small the icon looks.
+- Text contrast **4.5:1** (3:1 for large text) — in *both* themes.
+- Layouts that survive **200 % font scale**. This is where fixed-height rows break; use `wrapContentHeight` and test it.
+- **Custom actions** for anything that only works by gesture — a swipe-to-archive needs `customActions` so it is reachable without the swipe.
+- **`liveRegion`** for content that changes without user action, so a screen reader announces it.
+
+Test with the **Accessibility Scanner** app for a first pass, TalkBack for the real experience, and semantics assertions in tests for regression (ch. 18).
+
+## Localisation &amp; RTL
+
+**`start`/`end`, never `left`/`right`.** With `supportsRtl="true"`, `start` becomes right in Arabic and Hebrew, and a layout built on it mirrors for free. One `left` and that element stays behind.
+
+**Plurals are not a count check.** `getQuantityString` exists because languages have different plural categories — Arabic has six. Writing `if (n == 1)` is correct in English and wrong in most of the world.
+
+**Never concatenate a sentence.** Word order differs, so `"You have " + n + " items"` cannot be translated. Use a positional format string: `"You have %1$d items"`.
+
+**Pseudolocales** are the cheapest test available. `en-XA` accents every character and expands strings by about 40 %; `ar-XB` reverses the layout. Enable in developer options and most truncation and hardcoded-direction bugs appear in minutes.
+
+## Failure modes: Design systems & a11y
+
+**Text ignores the user's font size.** *Symptom:* an accessibility complaint; the app looks unchanged at 200 %. *Cause:* text sized in `dp`. *Fix:* `sp` for text, always.
+
+**A screen is unusable at 200 % font scale.** *Symptom:* overlapping or clipped labels. *Cause:* fixed heights and single-line assumptions. *Fix:* let content size itself; add a `fontScale` preview.
+
+**Content clipped under the status bar after a targetSdk bump.** *Symptom:* a header partly hidden on Android 15. *Cause:* enforced edge-to-edge; insets never handled. *Fix:* `safeDrawing` as content padding.
+
+**Dark theme looks flat and cards vanish.** *Symptom:* no visible separation between surfaces. *Cause:* hardcoded greys, so tonal elevation does not apply. *Fix:* Material surface roles.
+
+**TalkBack reads a card as three separate items, or skips a button.** *Symptom:* unusable with a screen reader. *Cause:* no merging; a missing `contentDescription`. *Fix:* merge descendants; label every interactive element.
+
+**A layout is mirrored except one element.** *Symptom:* one icon on the wrong side in Arabic. *Cause:* `left`/`right` or a `START` gravity constant. *Fix:* `start`/`end`; check with `ar-XB`.
+
+**"1 items".** *Symptom:* wrong plural in some languages. *Cause:* manual count branching. *Fix:* `plurals` resources.
+
+## Cheat-sheet: Design systems & a11y
+
+```bash
+adb shell settings put system font_scale 2.0        # 1.0 to reset
+adb shell cmd uimode night yes                      # dark theme
+adb shell settings put global development_settings_enabled 1
+adb shell setprop debug.force_rtl 1                 # or use ar-XB in developer options
+adb shell wm size 840x2400                          # expanded-ish; 'wm size reset'
+adb shell settings put global transition_animation_scale 0   # remove animations
+```
+
+```kotlin
+@Preview(fontScale = 2f)
+@Preview(uiMode = UI_MODE_NIGHT_YES)
+@Preview(locale = "ar", widthDp = 840)
+@Composable private fun ScreenPreviews() { ... }
+```
+
+| Requirement | Minimum |
+|---|---|
+| touch target | 48 dp |
+| text contrast | 4.5:1 (3:1 large), both themes |
+| font scale | usable at 200 % |
+| every interactive element | a `contentDescription` or a text label |
+| every decorative image | `contentDescription = null`, explicitly |
+
+<LabCard module=":ch09-design-systems">
+Take one screen and make it pass all six at once: 200 % font scale, the `ar-XB` pseudolocale, TalkBack traversal in a sensible order, an expanded window size class, dark mode, and edge-to-edge. Then lock each in with a screenshot test (ch. 18) so the next change cannot quietly break one — the value is in the regression gate, since all six are easy to fix once and easy to lose.
+</LabCard>
+
+## Surfaces beyond the phone
+
+The shared lesson: **a different input model and a different lifecycle**. Code that assumes a touch screen and your own process breaks.
+
+**App widgets with Glance** — Compose-style syntax producing `RemoteViews`, which are rendered **by the launcher's process, not yours**. That constraint explains the limitations: a restricted component set, no arbitrary drawing, and interaction only through `PendingIntent`s (ch. 6). Updates are limited to every 30 minutes from the system; anything more frequent must be pushed from your app, typically WorkManager (ch. 9).
+
+**App shortcuts** — static in XML, dynamic at runtime, or pinned by the user. Cheap, and underused.
+
+**Quick Settings tiles** put a toggle in the system panel. A `TileService` has its own short lifecycle and must be fast.
+
+**Wear OS** — tiles and complications are glanceable surfaces updated on the system's schedule, not yours. Interactions are seconds long, and battery discipline is stricter than on a phone.
+
+**Android Auto and TV** change input entirely. Auto is voice and a constrained template system, with driver-distraction rules you must pass. TV is a D-pad: **every element needs a focus state and a sensible traversal order**, which is where most ports fail.
+
+**XR**, briefly: spatial UI with a different interaction model again; the same lesson at a larger scale.

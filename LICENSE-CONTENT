@@ -1,0 +1,17 @@
+Course content licence
+======================
+
+This applies to everything under `src/content/`: the lesson prose, the figures,
+the quiz questions and the interview questions.
+
+Licensed under the Creative Commons Attribution-ShareAlike 4.0 International
+Licence (CC BY-SA 4.0).
+
+  https://creativecommons.org/licenses/by-sa/4.0/
+
+In short: you may share and adapt this material, including commercially, as
+long as you credit First Principles and its contributors, link to the licence,
+say what you changed, and release your adaptation under the same licence.
+
+Everything else in this repository, meaning the site code, components,
+configuration and tests, is licensed under the MIT Licence. See LICENSE.

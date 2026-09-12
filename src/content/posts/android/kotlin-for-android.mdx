@@ -1,0 +1,679 @@
+---
+title: "Kotlin for Android"
+navTitle: "Kotlin & coroutines"
+summary: "The Kotlin features that exist because of Android problems, and coroutines and Flow from the state machine up."
+readingTime: "4 hours"
+minutes: 270
+tags: ["null safety","platform types","sealed class","value class","data class","immutability","stability","inline","reified","delegation","variance","type erasure","scope functions","jvmstatic","sequences","k2","ksp","parcelize","looper","handler"]
+draft: true
+date: "2026-06-20"
+subtopic: "android-internals"
+subtopicOrder: 12
+part: "III"
+verifiedAgainst: "Kotlin 2.3 (K2) · compileSdk 36 · AGP 8.13"
+stage: "outline"
+labModule: ":ch12-kotlin"
+sources: ["02-kotlin-for-android-engineers#Null safety as an API contract","02-kotlin-for-android-engineers#Modelling state that cannot be invalid","02-kotlin-for-android-engineers#Immutability and equality","02-kotlin-for-android-engineers#Functions that shape APIs","02-kotlin-for-android-engineers#Delegation","02-kotlin-for-android-engineers#Generics &amp; variance","02-kotlin-for-android-engineers#Errors as values","02-kotlin-for-android-engineers#Scope functions, honestly","02-kotlin-for-android-engineers#Java interop in both directions","02-kotlin-for-android-engineers#Collections vs sequences","02-kotlin-for-android-engineers#The compiler you are using","02-kotlin-for-android-engineers#Failure modes","02-kotlin-for-android-engineers#Cheat-sheet","05-main-thread-coroutines-and-flow#Coroutines from the ground up","05-main-thread-coroutines-and-flow#Structured concurrency","05-main-thread-coroutines-and-flow#Dispatchers","05-main-thread-coroutines-and-flow#Error handling","05-main-thread-coroutines-and-flow#Flow","05-main-thread-coroutines-and-flow#Hot state holders","05-main-thread-coroutines-and-flow#Concurrency patterns that recur","05-main-thread-coroutines-and-flow#When not to use coroutines","05-main-thread-coroutines-and-flow#Testing","05-main-thread-coroutines-and-flow#Failure modes","05-main-thread-coroutines-and-flow#Cheat-sheet"]
+---
+This is not a Kotlin tutorial. It is a filtered one: the features that exist because of problems Android has, and the specific production failure each one removes.
+
+The filter matters because Kotlin has more surface than any one codebase needs. An Android engineer who knows `?.` but not platform types will still ship null-pointer crashes. One who writes `data class` everywhere without understanding structural equality will find chapter 13's Compose recomposition mysterious. Every section below names the failure first.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Null safety as an API contract
+
+Kotlin's null safety is usually taught as a language feature. On Android it is better understood as **an API contract that the framework does not honour**, and the interesting part is exactly where the contract lapses.
+
+Inside Kotlin, the rule is total. `String` can never hold null and the compiler proves it; `String?` can, and every use must handle that. The compiler is a checker, not a runtime guard — there is no cost at execution time.
+
+The lapse is the Java boundary, and most of the Android framework is Java.
+
+<Diagram
+  caption="Platform types are the hole in the contract. Kotlin knows a Java value might be null; it just declines to force you to say so, and the crash surfaces at the assignment rather than at the call."
+  label="Diagram of the nullability boundary: Kotlin non-null and nullable types are checked by the compiler, but a value returned from Java arrives as a platform type where the compiler steps aside, so a null lands at the assignment site rather than the call site."
+>
+  <svg viewBox="0 0 660 268" width="660" height="268">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-accent)">KOTLIN: THE COMPILER PROVES IT</text>
+    <rect x="8" y="26" width="250" height="104" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <rect x="22" y="40" width="222" height="34" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="133" y="55" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">val a: String</text>
+    <text x="133" y="68" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">cannot hold null. no check needed.</text>
+    <rect x="22" y="82" width="222" height="34" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="133" y="97" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">val b: String?</text>
+    <text x="133" y="110" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">every use must handle null.</text>
+
+    <text x="402" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">JAVA: NO INFORMATION</text>
+    <rect x="398" y="26" width="254" height="104" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-dasharray="4 3"/>
+    <rect x="412" y="40" width="226" height="76" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="525" y="62" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">String getTitle()</text>
+    <text x="525" y="80" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">might return null. might not.</text>
+    <text x="525" y="95" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">nothing in the type says which.</text>
+
+    <path d="M398 78 L258 78" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <path d="M266 72 L258 78 L266 84" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+
+    <rect x="150" y="158" width="360" height="40" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="330" y="175" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-warn)">the platform type: String!</text>
+    <text x="330" y="190" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">the compiler steps aside. you may treat it as either.</text>
+
+    <text x="330" y="224" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">assign it to String and the null check happens HERE, on assignment —</text>
+    <text x="330" y="240" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">so the stack trace blames your line, not the framework method that returned null.</text>
+    <path d="M330 198 L330 210" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <path d="M324 202 L330 210 L336 202" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+  </svg>
+</Diagram>
+
+A **platform type**, written `String!` in error messages but never in source, is Kotlin saying: this came from Java, I do not know, and I will not force you to decide. You get no compile error either way. If you assign it to a non-null type, Kotlin inserts a check at that assignment — so when it does blow up, the trace points at your line.
+
+That is the mechanism behind two classic Android crashes. `findViewById` returns a platform type: a wrong id compiles cleanly and throws at the assignment. And a `Parcelable` restored from a `Bundle` gives back platform types for every field, so a value that was never written arrives as null into a `String` and detonates on restore — a crash that only appears after process death (ch. 5).
+
+Three tools, in the order you should reach for them:
+
+- **Annotate the Java side** where you own it. `@Nullable` and `@NonNull` turn a platform type into a real Kotlin type. AndroidX is thoroughly annotated, which is why modern framework APIs give you `String?` rather than `String!`.
+- **`lateinit`** for a non-null property genuinely initialised after construction — a View bound in `onCreate`, a dependency injected later. It trades a compile-time guarantee for a clear runtime error (`UninitializedPropertyAccessException`) that names the property. Only for non-null, non-primitive `var`.
+- **`!!` almost never.** It converts "I have not thought about this" into a crash with no message. The honest uses are a test fixture and a case you have just checked in a way the compiler cannot see. Everywhere else, `?:` with a real fallback or an early return says more.
+
+<Callout kind="warn">
+`lateinit` on a Fragment's view binding is the most common leak in Android (ch. 5). The property outlives the view, so the correct pattern is a nullable backing field cleared in `onDestroyView` — not `lateinit`, which cannot be un-initialised.
+</Callout>
+
+## Modelling state that cannot be invalid
+
+Most UI bugs are not logic errors. They are states that should never have been representable.
+
+```kotlin
+// Four booleans: sixteen combinations, of which twelve are nonsense.
+data class ScreenState(
+    val isLoading: Boolean,
+    val hasError: Boolean,
+    val isEmpty: Boolean,
+    val items: List<Article>,
+)
+```
+
+Loading and error at once. Error with items. Empty with fifty items. Nothing stops any of it, so every consumer must defend against all sixteen, and one forgotten branch is a screen showing a spinner over an error message.
+
+```kotlin
+sealed interface ScreenState {
+    data object Loading : ScreenState
+    data class Content(val items: List<Article>) : ScreenState   // non-empty by construction
+    data object Empty : ScreenState
+    data class Failed(val cause: LoadError) : ScreenState
+}
+```
+
+Four states, all meaningful. The important property is not tidiness — it is that **`when` over a sealed type is exhaustive**, so adding `Refreshing` later turns every incomplete `when` into a compile error. The compiler becomes the checklist of screens to update.
+
+`sealed interface` over `sealed class` unless you need shared state, because an interface allows a subtype to participate in another hierarchy. `data object` for states with no payload gives you a sensible `toString` and a single instance.
+
+**Enums versus sealed:** an enum is a fixed set of values that carry no data; a sealed hierarchy is a fixed set of *shapes* that can. `LoadError.Network(retryAfter)` and `LoadError.NotFound` need different fields, so they need sealed.
+
+**`value class` for typed identifiers.** A screen that takes a `String` id will one day be handed a user id where an article id belongs, and it will compile.
+
+```kotlin
+@JvmInline value class ArticleId(val raw: String)
+```
+
+At runtime this is the underlying `String` — no wrapper is allocated in the common case, so the type safety is free. It is erased when boxed (in a `List`, or as a generic argument), which is a real limit worth knowing rather than a reason to avoid it.
+
+## Immutability and equality
+
+Two ideas that look like style and are load-bearing for chapters 13 and 14.
+
+**`val` is not immutability.** `val` means the *reference* cannot be reassigned. `val items: MutableList<String>` is a constant handle on a mutable list, and anyone holding it can change what you see. Kotlin's `List` is *read-only*, not immutable — it is an interface without mutators, and the object behind it may be a `MutableList` someone else still holds.
+
+```kotlin
+val backing = mutableListOf("a")
+val exposed: List<String> = backing    // read-only view
+backing.add("b")                        // exposed now has two elements
+```
+
+This is the `List` lie, and it matters because Compose decides whether to skip work by asking whether a value could have changed. A `List` parameter is treated as unstable precisely because of the code above. `kotlinx.collections.immutable`'s `PersistentList` closes the hole when it matters.
+
+**Structural equality is what `data class` gives you.** `==` calls `equals`; `===` compares references. `data class` generates `equals`, `hashCode`, `toString` and `copy` from the properties **in the primary constructor only** — a property declared in the body is invisible to all four, which is a quiet source of "two objects that should be equal are not".
+
+The `hashCode` contract is the part that bites: equal objects must have equal hash codes, and a hash code must not change while the object is in a hash-based collection. Put a mutable property in a `data class`, use it as a map key, mutate it, and the entry becomes unreachable — still in the map, no longer findable.
+
+`copy()` is how you make a change without mutating, and it is a **shallow** copy: nested objects are shared. Copying a state object whose list is mutable copies the handle, not the contents.
+
+<Callout kind="note">
+Forward reference to ch. 13: Compose skips a composable when it can prove its parameters have not changed, which requires the compiler to consider each parameter *stable*. `data class` of `val`s of stable types is stable. A non-data class, a `var`, or a `List` is not. The equality rules here are the recomposition rules there.
+</Callout>
+
+## Functions that shape APIs
+
+**Extension functions** add a method to a type you do not own, resolved *statically* — there is no dynamic dispatch, and an extension never overrides a member. On Android they exist mostly to make framework types pleasant: `Context.dp`, `View.hideKeyboard()`. Keep them in the module that owns the concept, or they become an unfindable pile.
+
+**Default and named arguments** replace telescoping overloads. One function with defaults beats five overloads — and note that from Java there is only *one* method unless you add `@JvmOverloads`.
+
+**`inline` and `reified`.** A higher-order function normally allocates: the lambda becomes an object, and captured variables become fields on it. In a scroll handler or a recomposition that allocation is real cost. `inline` copies the function body and the lambda into the call site, so nothing is allocated and a non-local `return` becomes possible.
+
+```kotlin
+inline fun <reified T> Bundle.require(key: String): T =
+    get(key) as? T ?: error("Missing $key of type ${T::class.simpleName}")
+```
+
+`reified` is only possible because of inlining: the type argument is substituted at the call site, so the type survives erasure. Without `inline` you would need a `Class<T>` parameter.
+
+Inlining copies code, so inlining a large function called from many places grows your DEX. `crossinline` forbids a non-local return from a lambda; `noinline` keeps one lambda as a real object when you need to store or pass it on. Inline a function for the lambda, not out of habit — the compiler warns when the gain is nil.
+
+## Delegation
+
+Delegation replaces inheritance with composition, and Android leans on it heavily.
+
+**Property delegation** puts the *how* of a property behind an object.
+
+```kotlin
+private val analytics by lazy { Analytics(context) }        // built on first access, thread-safe
+private val viewModel: FeedViewModel by viewModels()        // resolved from the ViewModelStore
+private val binding by viewBinding(FeedBinding::bind)       // cleared with the view
+```
+
+`by lazy` defaults to synchronised initialisation — correct, with a lock you may not want on a hot path; `LazyThreadSafetyMode.NONE` removes it when you know access is confined to one thread.
+
+`by viewModels()` is the pattern that makes ch. 5's ViewModel scoping invisible: the delegate finds the `ViewModelStoreOwner` and returns the existing instance across configuration changes.
+
+Writing your own delegate is a `getValue`/`setValue` pair, and it is the clean fix for the Fragment binding leak — a delegate that nulls its reference when the view lifecycle ends.
+
+**Interface delegation** forwards an interface to a member without inheritance:
+
+```kotlin
+class LoggingRepo(private val real: Repo) : Repo by real {
+    override fun find(id: ArticleId) = real.find(id).also { log(id) }
+}
+```
+
+Everything not overridden is forwarded. This is decoration without a base class, and it is how you add behaviour to a dependency you did not write.
+
+## Generics &amp; variance
+
+Variance answers one question: if `Article` is a `Content`, is `List<Article>` a `List<Content>`?
+
+**`out` (covariant) — a producer.** `List<out T>` only hands values out, so `List<Article>` *is* a `List<Content>`; every element you take is at least a `Content`.
+
+**`in` (contravariant) — a consumer.** `Comparator<in T>` only takes values, so a `Comparator<Content>` can compare `Article`s.
+
+The rule reads as *producer out, consumer in*. `MutableList<T>` is neither, which is why it is invariant: allowing `MutableList<Article>` where `MutableList<Content>` is expected would let a caller add a `Video` to your list of articles.
+
+**Type erasure** is the constraint underneath. Generic type arguments do not exist at runtime — `List<String>` and `List<Int>` are both `List`. So `value is List<String>` cannot compile, `as List<String>` is unchecked and will succeed and then fail later at the first element, and you cannot overload on generic argument alone. `reified` recovers the type only where inlining allows it. `*` (star projection) says "some type, I do not care", and is honest where an unchecked cast is not.
+
+## Errors as values
+
+Kotlin has exceptions but no checked exceptions, which is a deliberate rejection of Java's model. The consequence: **nothing in a signature tells you what can fail**, so failure has to be modelled where it matters.
+
+The rule worth adopting: *exceptions for programmer error, values for expected failure*. A malformed argument is a bug — throw. A network request failing is a Tuesday — return it.
+
+```kotlin
+sealed interface LoadResult<out T> {
+    data class Ok<T>(val value: T) : LoadResult<T>
+    data class Failed(val reason: LoadError) : LoadResult<Nothing>
+}
+```
+
+`out T` makes `LoadResult<Article>` usable as `LoadResult<Content>`, and `Nothing` lets one `Failed` serve every result type — `Nothing` is a subtype of everything.
+
+**`runCatching` has two traps**, and both matter on Android. It catches `Throwable`, so it swallows `OutOfMemoryError` and `StackOverflowError` — things you should not continue after. And it catches `CancellationException`, which is how coroutines signal cancellation (ch. 12). Swallowing that turns a cancelled coroutine into one that keeps running and reports a "failure" nobody asked about, which is a genuinely hard bug to find.
+
+```kotlin
+suspend fun load(): LoadResult<Article> =
+    try {
+        LoadResult.Ok(api.fetch())
+    } catch (e: CancellationException) {
+        throw e                                   // never swallow this
+    } catch (e: IOException) {
+        LoadResult.Failed(LoadError.Network)      // catch what you can name
+    }
+```
+
+## Scope functions, honestly
+
+Five functions that differ on two axes: what the lambda receives (`this` or `it`) and what the expression returns (the receiver or the lambda's result).
+
+| | returns the receiver | returns the lambda result |
+|---|---|---|
+| **`this`** | `apply` | `run`, `with` |
+| **`it`** | `also` | `let` |
+
+A rule that survives review:
+
+- **`apply`** — configure and return the same object. `Intent().apply { putExtra(...) }`.
+- **`also`** — a side effect that does not change the value. Logging in a chain.
+- **`let`** — transform a value, and idiomatically to scope a nullable: `value?.let { ... }`.
+- **`run`** — a block that computes something with a receiver.
+- **`with`** — `run` for a value you already have, when you are about to touch it several times.
+
+The failure mode is nesting. Two `let`s deep, `it` means something different at each level and nobody can read it. Name the parameter (`?.let { article -> ... }`) or use a local `val`. Scope functions are for removing a name that adds nothing; when the name adds something, keep it.
+
+## Java interop in both directions
+
+Android is a Java platform with a Kotlin front end, so interop is not an edge case.
+
+**Calling Java from Kotlin** is the nullability problem above, plus SAM conversion: a Java interface with one method accepts a Kotlin lambda directly, which is why `setOnClickListener { }` reads well.
+
+**Calling Kotlin from Java** — a legacy module, an annotation processor, a testing framework — needs annotations, because Kotlin concepts have no Java equivalent:
+
+| Annotation | Without it, Java sees |
+|---|---|
+| `@JvmStatic` | `Helper.Companion.parse(...)` instead of `Helper.parse(...)` |
+| `@JvmOverloads` | one method, whatever the defaults |
+| `@JvmField` | `getX()` instead of the field |
+| `@JvmName` | a mangled name for internal functions and same-signature clashes |
+| `@Throws` | no checked exception, so Java cannot `catch` it |
+
+`@Throws` is the one that surprises people: Kotlin has no checked exceptions, so a Kotlin function that throws `IOException` is, to Java, a function that throws nothing — and Java code cannot compile a `catch` for it.
+
+## Collections vs sequences
+
+The same operators, a different evaluation strategy, and a real difference on a scrolling list.
+
+<Diagram
+  caption="A collection chain materialises a full intermediate list at each step. A sequence pulls one element all the way through, and short-circuits."
+  label="Comparison diagram: a list chain of map then filter then first allocates two intermediate lists over all one thousand elements, whereas a sequence pulls each element through map and filter until the first match and then stops."
+>
+  <svg viewBox="0 0 660 236" width="660" height="236">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">LIST — EAGER, MATERIALISED AT EVERY STEP</text>
+    <rect x="10" y="28" width="96" height="34" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="58" y="49" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">1000 items</text>
+    <rect x="140" y="28" width="120" height="34" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="200" y="44" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">map</text>
+    <text x="200" y="57" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">new list of 1000</text>
+    <rect x="294" y="28" width="120" height="34" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="354" y="44" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">filter</text>
+    <text x="354" y="57" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">another new list</text>
+    <rect x="448" y="28" width="120" height="34" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="508" y="49" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">first()</text>
+    <path d="M106 45h34M260 45h34M414 45h34" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="590" y="49" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">2000 wasted</text>
+
+    <text x="12" y="120" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">SEQUENCE — LAZY, ONE ELEMENT AT A TIME</text>
+    <rect x="10" y="130" width="96" height="34" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="58" y="151" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">1000 items</text>
+    <rect x="140" y="130" width="120" height="34" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="200" y="151" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">map</text>
+    <rect x="294" y="130" width="120" height="34" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="354" y="151" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">filter</text>
+    <rect x="448" y="130" width="120" height="34" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="508" y="151" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-ok)">first()</text>
+    <path d="M106 147h34M260 147h34M414 147h34" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="590" y="151" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">0 wasted</text>
+    <text x="289" y="192" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">each element is pulled through the whole chain, then the next —</text>
+    <text x="289" y="208" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">so the work stops the moment first() is satisfied.</text>
+  </svg>
+</Diagram>
+
+A `Sequence` is not free: it allocates a small object per operator and per element pull. For a list of ten, the eager version is faster. Sequences win when the collection is large, when the chain is long, or when a terminal operator can short-circuit (`first`, `any`, `take`).
+
+The Android-specific case is a list adapter or a `remember` block that runs on every frame: an eager chain over a few hundred items allocates a few hundred objects sixty times a second, and that is GC pressure you will see as jank in chapter 11. Measure rather than assume — `asSequence()` on a five-element list is a pessimisation.
+
+## The compiler you are using
+
+Kotlin on Android is not just a language; it is a compiler with plugins that generate a large fraction of your code.
+
+**K2** is the current frontend, and the practical consequences are faster compilation and better type inference. Kotlin 2.x is K2-only.
+
+**Compiler plugins do work you would otherwise write:**
+
+| Plugin | What it generates |
+|---|---|
+| `kotlinx.serialization` | serialisers at **compile time**, so no reflection and no R8 keep rules (ch. 2) |
+| Parcelize | the whole `Parcelable` implementation from `@Parcelize` |
+| Compose | the entire transformation of chapter 13 — the Composer, groups, skipping |
+
+Parcelize is worth adopting for one reason beyond brevity: a hand-written `Parcelable` whose `writeToParcel` and `createFromParcel` disagree on field order fails silently, restoring shifted values. Generated code cannot disagree with itself.
+
+**KSP versus kapt** is a build-time decision with real numbers. `kapt` generates Java stubs for all your Kotlin so a Java annotation processor can read them; that stub generation is often the single slowest task in an Android build. KSP reads Kotlin directly and is typically around twice as fast. Prefer KSP; chapter 20 measures it.
+
+**`contract`** lets a function tell the compiler something it cannot infer, which is how `isNullOrEmpty()` smart-casts your variable afterwards. **Opt-in annotations** (`@RequiresOptIn`) are how a library marks an API as unstable, and the reason `@OptIn(ExperimentalFoundationApi::class)` appears in Compose code.
+
+## Failure modes: Kotlin
+
+**A `NullPointerException` whose stack trace blames your assignment, not the framework.** *Symptom:* a crash on a line that merely stores a value, often after process death or a configuration change. *Cause:* a platform type from Java assigned to a non-null Kotlin type; the check Kotlin inserted fired. *Fix:* type the value as nullable and handle it, or annotate the Java source. Do not add `!!`.
+
+**A screen renders a spinner on top of an error.** *Symptom:* two mutually exclusive UI states visible at once, usually only after a retry. *Cause:* boolean flags allow combinations nobody designed. *Fix:* a sealed hierarchy, so `when` is exhaustive and the compiler lists every screen to update when a state is added.
+
+**A map entry that cannot be found although it is in the map.** *Symptom:* `map[key]` returns null while `map.size` says the entry exists. *Cause:* a mutable property inside a `data class` used as a key changed after insertion, so the hash bucket is wrong. *Fix:* keys are immutable — a `value class` over an id, not a whole model object.
+
+**Compose recomposes on every frame and the metrics report says "unstable".** *Symptom:* recomposition counts that never settle; scrolling drops frames. *Cause:* a `List` or a `var` in a state class; the compiler cannot prove nothing changed. *Fix:* `val`s of stable types, and a persistent collection where a list must be a parameter. Chapter 13 walks the metrics report.
+
+**A coroutine keeps running after the screen is gone, and logs a failure.** *Symptom:* work continues after navigation; an error is reported for a request nobody is waiting for. *Cause:* `runCatching` or a broad `catch (e: Exception)` swallowed `CancellationException`. *Fix:* rethrow it explicitly, and catch named exceptions rather than the whole hierarchy.
+
+**Java code cannot catch an exception your Kotlin function clearly throws.** *Symptom:* a compile error in a legacy module, or an uncaught exception crossing the boundary. *Cause:* no `@Throws`, so the checked exception is invisible to Java. *Fix:* annotate the function.
+
+## Cheat-sheet: Kotlin
+
+```kotlin
+// nullability
+val a: String   = maybe ?: return          // early return beats !!
+val b: String?  = javaCall()               // type the platform value honestly
+lateinit var c: View                       // non-null, initialised later, never for a Fragment view
+
+// states that cannot be invalid
+sealed interface State { data object Loading : State; data class Ok(val v: Int) : State }
+@JvmInline value class UserId(val raw: String)
+
+// stability for Compose (ch. 13)
+data class UiState(val title: String, val items: PersistentList<Item>)   // all val, stable types
+
+// cancellation-safe error handling
+catch (e: CancellationException) { throw e }   // ALWAYS first
+catch (e: IOException) { /* handle */ }        // then what you can name
+
+// interop, for a Java caller
+@JvmStatic @JvmOverloads @Throws(IOException::class)
+fun parse(input: String, strict: Boolean = false): Result
+```
+
+| Reach for | When |
+|---|---|
+| `sealed interface` | a closed set of shapes; you want exhaustive `when` |
+| `enum` | a closed set of values with no payload |
+| `value class` | a typed id with no runtime cost |
+| `data class` | a value compared by contents — constructor properties only |
+| `inline` | the function takes a lambda and is called hot |
+| `Sequence` | large collection, long chain, or a short-circuiting terminal |
+| `by lazy` | expensive, may never be needed, built once |
+| KSP over kapt | always, where the library supports it |
+
+<LabCard module=":ch02-kotlin">
+Refactor a Java-style Android class into idiomatic Kotlin — booleans to a sealed state, raw `String` ids to `value class`, hand-written `Parcelable` to `@Parcelize` — then measure the delta with `apkanalyzer dex references` and an allocation trace. Separately, replace one reflective helper with a compile-time alternative and confirm the R8 keep rule it needed can be deleted.
+</LabCard>
+
+## Coroutines from the ground up
+
+A coroutine is not a thread. It is a **computation that can suspend and resume**, and the compiler implements it as a state machine.
+
+```kotlin
+suspend fun load(id: String): Article {
+    val raw = api.fetch(id)      // suspension point
+    return parse(raw)
+}
+```
+
+The compiler rewrites that into something shaped like a class with a `label` field and a `Continuation` — an object holding "what to do next". At `api.fetch`, the function *returns*, freeing its thread, and registers the continuation to be resumed when the result arrives.
+
+Three consequences that dissolve most confusion:
+
+**Suspending is not blocking.** A blocked thread is a thread doing nothing but occupying memory and a scheduler slot. A suspended coroutine holds no thread at all. This is why thousands of concurrent coroutines are fine where thousands of threads are not.
+
+**`suspend` is a contract, not a behaviour.** It means "this may suspend", and by convention on Android it also means **main-safe**: safe to call from the main thread, because if it needs another thread it will switch internally with `withContext`. A `suspend` function that blocks the caller's thread is a bug — it has the marker without the guarantee.
+
+**Suspension points are where cancellation happens.** Cancellation is cooperative; it can only take effect at a suspension point, which is why a tight CPU loop with no suspension ignores cancellation entirely.
+
+## Structured concurrency
+
+The idea that makes coroutines safe rather than merely convenient: **every coroutine has a parent, and no coroutine outlives its parent.**
+
+A `CoroutineScope` holds a `Job`. Launching inside it makes a child. Cancel the scope and every descendant is cancelled. There is no way to accidentally leave work running after a screen is gone, because the screen's scope owns it.
+
+On Android the scopes are provided: `viewModelScope` is cancelled in `onCleared`, `lifecycleScope` when the owner is destroyed, and `repeatOnLifecycle` (ch. 5) restarts a block across visibility changes.
+
+Cancellation propagates **down** by default and, for failure, **up**: a failing child cancels its parent, which cancels its siblings. That is usually right — if one part of loading a screen fails, the rest is pointless. When it is not, `SupervisorJob` makes children fail independently.
+
+Cooperative cancellation means checking:
+
+```kotlin
+suspend fun processAll(items: List<Item>) {
+    for (item in items) {
+        ensureActive()          // throws CancellationException if cancelled
+        heavyCpuWork(item)      // no suspension point inside, so nothing else would notice
+    }
+}
+```
+
+And cleanup must survive it:
+
+```kotlin
+try {
+    stream.use { transfer(it) }
+} finally {
+    withContext(NonCancellable) { markTransferAborted() }   // suspending cleanup
+}
+```
+
+Without `NonCancellable`, a suspending call in `finally` on an already-cancelled coroutine throws immediately and the cleanup never runs.
+
+## Dispatchers
+
+A dispatcher decides which thread a coroutine resumes on.
+
+| Dispatcher | Backed by | For |
+|---|---|---|
+| `Main` | the Looper above | UI work |
+| `Main.immediate` | same, no re-post if already there | avoiding a needless queue hop |
+| `Default` | a pool sized to CPU cores | CPU-bound work: parsing, sorting, image maths |
+| `IO` | an elastic pool, up to 64 threads | blocking calls: files, sockets, JDBC-style APIs |
+| `Unconfined` | wherever it was | almost never; testing internals |
+
+`IO` is large because its threads are expected to be *blocked*, not busy — sixty-four blocked threads cost memory but no CPU. `Default` is small because more CPU-bound threads than cores only adds context switching.
+
+`limitedParallelism` carves a slice out of a dispatcher, which is the clean way to serialise access to something that cannot take concurrency:
+
+```kotlin
+private val diskDispatcher = Dispatchers.IO.limitedParallelism(1)
+```
+
+**Where `withContext` belongs is a design decision.** Put it inside the function that needs it, so callers get main-safety for free:
+
+```kotlin
+// Good: the caller never has to know.
+suspend fun readSettings(): Settings = withContext(Dispatchers.IO) { file.readText().let(::parse) }
+
+// Bad: main-safety becomes every caller's problem, and one will forget.
+fun readSettingsBlocking(): Settings = file.readText().let(::parse)
+```
+
+`withContext` is not free — it is a dispatch, roughly a microsecond. Wrapping a trivial computation in `Dispatchers.Default` costs more than it saves.
+
+## Error handling
+
+Coroutine exceptions behave differently from ordinary ones, and the differences cause real bugs.
+
+**`launch` propagates immediately.** An uncaught exception cancels the parent and reaches the `CoroutineExceptionHandler` — or crashes the app.
+
+**`async` holds the exception until `await()`.** A `Deferred` nobody awaits swallows the failure silently.
+
+**`SupervisorJob` isolates children.** With a plain `Job`, one failing child cancels its siblings. Under a supervisor they fail alone — which is what you want for several independent screen sections.
+
+**`CancellationException` is not a failure.** It is the normal signal that a coroutine was cancelled, so it is deliberately excluded from exception handlers. The rule from chapter 12 applies here with teeth:
+
+```kotlin
+try {
+    doWork()
+} catch (e: CancellationException) {
+    throw e                       // ALWAYS rethrow — swallowing it breaks cancellation
+} catch (e: IOException) {
+    showError(e)
+}
+```
+
+Swallow it and the coroutine believes it is still running while its scope believes it is gone. That produces work continuing after a screen closes and errors reported for requests nobody is waiting for.
+
+## Flow
+
+A `Flow` is a cold, suspending sequence: nothing happens until someone collects, and each collector gets its own run of the producer.
+
+```kotlin
+fun articles(): Flow<List<Article>> = flow {
+    emit(cache.read())                 // fast, stale
+    emit(api.fetch().also(cache::write))  // slow, fresh
+}
+```
+
+**`flowOn` changes the context of everything *upstream* of it**, which is why it belongs next to the producer rather than the collector:
+
+```kotlin
+fun articles(): Flow<List<Article>> = flow { emit(db.load()) }.flowOn(Dispatchers.IO)
+```
+
+`catch` intercepts upstream exceptions only, and `onCompletion` runs on both success and failure. Neither catches an exception thrown *in the collector*, which is a common surprise.
+
+**`callbackFlow` is the bridge from every callback API on Android:**
+
+```kotlin
+fun connectivity(cm: ConnectivityManager): Flow<Boolean> = callbackFlow {
+    val callback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(n: Network) { trySend(true) }
+        override fun onLost(n: Network) { trySend(false) }
+    }
+    cm.registerDefaultNetworkCallback(callback)
+    awaitClose { cm.unregisterNetworkCallback(callback) }   // MANDATORY
+}
+```
+
+`awaitClose` is not optional — without it the builder throws, and that is deliberate: a callback registered and never unregistered is a leak, and the API refuses to let you write one.
+
+**Backpressure** is what happens when the producer outruns the collector. `buffer` lets the producer run ahead; `conflate` keeps only the latest; `collectLatest` cancels the previous collector body when a new value arrives. For UI, `conflate` and `collectLatest` are usually right — the user only cares about the newest state.
+
+## Hot state holders
+
+Cold flows model *work*. UI needs something that models *current value*, and that is where hot holders come in.
+
+| | Holds a value | Replays to new collectors | Use for |
+|---|---|---|---|
+| `StateFlow` | yes, always one | yes, the current one | UI state |
+| `SharedFlow` | configurable | configurable | events, when you must |
+| `Channel` | no, each value goes to one consumer | no | exactly-once handoff |
+| `LiveData` | yes | yes | legacy; lifecycle-aware by construction |
+
+`stateIn` converts a cold flow into a `StateFlow`, and its `started` parameter is the interesting part:
+
+```kotlin
+val state = repository.articles()
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Loading)
+```
+
+`WhileSubscribed(5_000)` keeps the upstream alive for five seconds after the last collector goes away. That number is not arbitrary: it is longer than a configuration change (ch. 5), so a rotation does not tear down and restart your database query, and shorter than a user's attention, so backgrounding does eventually stop the work.
+
+**Events versus state.** A `StateFlow` re-emits its current value to every new collector, so a one-shot event stored in one is redelivered after every rotation — the "navigate" that fires twice, the snackbar that reappears forever. The options, in order of preference: model it as state with a consumed flag; or use a `Channel` with `receiveAsFlow`, which delivers exactly once. A `SharedFlow` with `replay = 0` works but drops events while nothing is collecting, which `repeatOnLifecycle` guarantees will happen.
+
+## Concurrency patterns that recur
+
+**Parallel decomposition** — independent work concurrently, joined at the end:
+
+```kotlin
+coroutineScope {
+    val user = async { userRepo.load(id) }
+    val feed = async { feedRepo.load(id) }
+    Screen(user.await(), feed.await())     // fails as a unit if either fails
+}
+```
+
+**Timeout and retry with backoff:**
+
+```kotlin
+suspend fun <T> retrying(times: Int = 3, block: suspend () -> T): T {
+    var delayMs = 300L
+    repeat(times - 1) {
+        try { return withTimeout(10_000) { block() } }
+        catch (e: CancellationException) { throw e }
+        catch (e: IOException) { delay(delayMs + Random.nextLong(100)); delayMs *= 2 }
+    }
+    return block()
+}
+```
+
+The jitter matters: without it, every client that failed at the same moment retries at the same moment (ch. 16).
+
+**Debounce for search** — the canonical chain, and the chapter's lab:
+
+```kotlin
+queryFlow
+    .debounce(300)
+    .distinctUntilChanged()
+    .flatMapLatest { repo.search(it) }   // cancels the in-flight request on a new query
+```
+
+`flatMapLatest` is what makes this correct rather than merely quiet: an older, slower response can no longer arrive after a newer one and overwrite it.
+
+**Shared mutable state** — a `Mutex` (`withLock`) for a critical section, or confine the state to a single-threaded dispatcher. Never a `synchronized` block containing a suspension point; it will block a pooled thread while the coroutine is suspended.
+
+## When not to use coroutines
+
+Honesty about the boundaries.
+
+**Callback APIs you do not own** — wrap with `suspendCancellableCoroutine` (one-shot) or `callbackFlow` (stream), rather than restructuring around them.
+
+**RxJava** — interop both ways exists (`kotlinx-coroutines-rx3`), and mixing indefinitely is worse than a boundary at one layer. Convert at the repository edge.
+
+**JNI threads** (appendix B) and the **RenderThread** (ch. 8) are not yours to dispatch to. Native code calling back into Kotlin arrives on whatever thread it chose.
+
+**`Executor`-based APIs** — CameraX, Media3 and others take an `Executor`. Give them one; do not try to make them coroutines.
+
+## Testing
+
+Coroutines are testable in a way callbacks were not, because virtual time makes delays free.
+
+```kotlin
+@Test fun `debounces and cancels the in-flight request`() = runTest {
+    val vm = SearchViewModel(repo, StandardTestDispatcher(testScheduler))
+
+    vm.state.test {                       // Turbine
+        assertEquals(Idle, awaitItem())
+        vm.onQueryChanged("an")
+        advanceTimeBy(301)                // 300 ms debounce, instantly
+        assertEquals(Loading, awaitItem())
+        assertEquals(Results(listOf(article)), awaitItem())
+        cancelAndIgnoreRemainingEvents()
+    }
+}
+```
+
+`runTest` provides a scheduler where `delay` is skipped, so a 30-second backoff test runs in a millisecond. **Inject dispatchers** rather than referencing `Dispatchers.IO` directly — an untestable coroutine is almost always one that hardcoded its dispatcher. `Dispatchers.setMain` replaces the main dispatcher, which has no Looper under a unit test. Chapter 18 goes further.
+
+## Failure modes: Main thread & coroutines
+
+**An ANR whose top frame is not your code.** *Symptom:* a Play Console cluster with `BinderProxy.transactNative` on top. *Cause:* a synchronous framework call to a busy process (ch. 2). *Fix:* treat framework calls as I/O; move them off the main thread.
+
+**A screen updates in a burst after being backgrounded.** *Symptom:* the UI flickers through several states on resume. *Cause:* collection continued while invisible, or `launchWhenStarted` buffered (ch. 5). *Fix:* `repeatOnLifecycle(STARTED)`, and `conflate` or `collectLatest` for UI.
+
+**Search results from an old query overwrite a newer one.** *Symptom:* typing fast leaves the wrong results on screen. *Cause:* `flatMapConcat`/`flatMapMerge` instead of `flatMapLatest`, so the slow older request finishes last. *Fix:* `flatMapLatest`.
+
+**A navigation event fires twice after rotation.** *Symptom:* two screens pushed, or a snackbar that returns forever. *Cause:* a one-shot event in a `StateFlow`, replayed to the new collector. *Fix:* a `Channel`, or state with a consumed flag.
+
+**Work continues after the screen is gone.** *Symptom:* network requests and errors for a closed screen. *Cause:* `CancellationException` swallowed by a broad catch or `runCatching`; or a scope that is not lifecycle-bound. *Fix:* rethrow it; use `viewModelScope`.
+
+**A cancelled coroutine never actually stops.** *Symptom:* CPU stays high after navigating away. *Cause:* a tight loop with no suspension point, so cancellation has nowhere to take effect. *Fix:* `ensureActive()` inside the loop.
+
+**A `callbackFlow` leaks its listener.** *Symptom:* growing memory, callbacks firing for dead screens. *Cause:* unregistering outside `awaitClose`, so it never runs on cancellation. *Fix:* unregister inside `awaitClose`.
+
+## Cheat-sheet: Main thread & coroutines
+
+```kotlin
+// main-safety belongs INSIDE the function
+suspend fun load() = withContext(Dispatchers.IO) { file.readText() }
+
+// cancellation
+catch (e: CancellationException) { throw e }        // always first
+ensureActive()                                       // inside CPU loops
+withContext(NonCancellable) { cleanup() }            // suspending cleanup in finally
+
+// UI state, surviving rotation without restarting the query
+.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), initial)
+
+// search, correctly
+.debounce(300).distinctUntilChanged().flatMapLatest { repo.search(it) }
+
+// wrapping any Android callback
+callbackFlow { register(cb); awaitClose { unregister(cb) } }
+```
+
+```bash
+adb shell am start -W <pkg>/.MainActivity     # is startup blocking the first frame
+adb shell dumpsys gfxinfo <pkg> framestats    # per-frame timings (ch. 8)
+adb pull /data/anr/traces.txt                 # read the MAIN thread stack first
+```
+
+| Symptom | Likely cause |
+|---|---|
+| jank on a mid-range device only | main-thread work inside the 16.6 ms budget |
+| ANR at `transactNative` | a Binder call to a busy process |
+| stale results win | `flatMapLatest` missing |
+| event fires twice | one-shot event in a `StateFlow` |
+| work outlives the screen | swallowed `CancellationException` |
+
+<LabCard module=":ch05-main-thread">
+Build a search screen with debounce, cancellation and retry-with-backoff. Then prove the three properties that matter with evidence rather than assertion: a Perfetto trace showing no work runs while the app is backgrounded, a test showing rotation does not restart the in-flight request, and a fast-typing test showing an older response can never overwrite a newer one. Finally, add a deliberate 40 ms main-thread call and find it in `dumpsys gfxinfo framestats`.
+</LabCard>

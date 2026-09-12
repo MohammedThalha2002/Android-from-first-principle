@@ -1,0 +1,499 @@
+---
+title: "Activity & Process Lifecycle"
+navTitle: "Lifecycle"
+summary: "From tapping the icon to process death and back. The state machine, the three tiers of state, tasks and the back stack."
+readingTime: "2 hours"
+minutes: 115
+tags: ["activity lifecycle","onstop","ondestroy","process death","savedstatehandle","oninstancestate","viewmodel","configuration change","multi-window","fragment","viewlifecycleowner","repeatonlifecycle","back stack","launchmode","predictive back","state restoration"]
+draft: true
+date: "2026-05-02"
+subtopic: "android-internals"
+subtopicOrder: 5
+part: "II"
+verifiedAgainst: "compileSdk 36 · AGP 8.13 · Kotlin 2.3 · Lifecycle 2.9"
+stage: "outline"
+labModule: ":ch05-lifecycle"
+sources: ["01-platform-from-the-ground-up#Find the library that slowed your startup","04-lifecycle-state-and-process-death#The Activity lifecycle as a state machine","04-lifecycle-state-and-process-death#Multi-window and the death of \"resumed means visible\"","04-lifecycle-state-and-process-death#Configuration changes","04-lifecycle-state-and-process-death#Three tiers of state, and which to use","04-lifecycle-state-and-process-death#Process death, properly","04-lifecycle-state-and-process-death#Lifecycle-aware components","04-lifecycle-state-and-process-death#ViewModel","04-lifecycle-state-and-process-death#Tasks, the back stack &amp; predictive back","04-lifecycle-state-and-process-death#Failure modes","04-lifecycle-state-and-process-death#Cheat-sheet"]
+---
+Ten callbacks looks like bad API design until you notice they are answering four different questions, and that the answers genuinely come apart.
+
+*Is the Activity constructed?* *Is it visible?* *Does it have input focus?* *Does its process still exist?* A screen in split view is visible without focus. A screen behind a transparent dialog is visible and unfocused. A screen the user left ten minutes ago may be none of those and yet still be "alive" in the sense that the user expects to come back to it — or its process may have been destroyed and it will be rebuilt from a `Bundle`.
+
+One callback cannot express that. The lifecycle is the platform being precise about a genuinely complicated situation, and almost every state bug in Android is a place where an engineer collapsed those four questions into one.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Find the library that slowed your startup
+
+**You will:** measure your app's start with one command, add 300 ms to it without touching `Application` or any Activity, and find where it went.
+**You need:** the app from this chapter, and `adb`.
+**Time:** about 20 minutes.
+**Built with:** compileSdk 36, AGP 8.13, Kotlin 2.3, platform-tools 36.
+
+### The problem you can see
+
+First, a baseline. Stop the process so the next start is a real cold start, then start it and wait for the first frame:
+
+```bash
+adb shell am force-stop dev.firstprinciples.android
+adb shell am start -W -n dev.firstprinciples.android/.MainActivity
+```
+
+```
+Starting: Intent { act=android.intent.action.MAIN cat=[LAUNCHER] ... }
+Status: ok
+LaunchState: COLD
+Activity: dev.firstprinciples.android/.MainActivity
+TotalTime: 431
+WaitTime: 447
+```
+
+431 ms from the request to the first frame. Now add this class. A `ContentProvider` is an Android component with its own purpose (chapter 6), but libraries use it for something else: as a hook that runs code when your app starts, without you calling anything. This one pretends to be such a library.
+
+```kotlin
+// SlowLibraryProvider.kt
+class SlowLibraryProvider : ContentProvider() {
+    override fun onCreate(): Boolean {
+        Log.d("Startup", "provider onCreate")
+        Thread.sleep(300)     // stands in for a library setting itself up
+        return true
+    }
+    // The rest are required by the class and unused here.
+    override fun query(uri: Uri, p: Array<String>?, s: String?, a: Array<String>?, o: String?): Cursor? = null
+    override fun getType(uri: Uri): String? = null
+    override fun insert(uri: Uri, v: ContentValues?): Uri? = null
+    override fun delete(uri: Uri, s: String?, a: Array<String>?): Int = 0
+    override fun update(uri: Uri, v: ContentValues?, s: String?, a: Array<String>?): Int = 0
+}
+```
+
+Register it in the manifest, and add one log line to your `Application` class (create `App` and point `android:name=".App"` at it if you do not have one):
+
+```xml
+<!-- AndroidManifest.xml, inside <application> -->
+<provider
+    android:name=".SlowLibraryProvider"
+    android:authorities="dev.firstprinciples.android.slow"
+    android:exported="false" />
+```
+
+```kotlin
+// App.kt
+class App : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        Log.d("Startup", "Application onCreate")
+    }
+}
+```
+
+Force-stop and start again. `TotalTime` is now about 300 ms higher. Then look at the order of your two log lines:
+
+```bash
+adb logcat -d -s Startup
+```
+
+```
+D Startup: provider onCreate
+D Startup: Application onCreate
+```
+
+The provider ran **before** `Application.onCreate`. Your first line of code was not the first line of code that ran.
+
+### What is actually happening
+
+When you tap the icon, this happens in order. Everything in it comes from an earlier lesson.
+
+1. The launcher asks `system_server` to open your screen (lesson 2).
+2. No process exists, so `system_server` creates one (lesson 1). Nothing of yours has run yet.
+3. The new process loads your code (lesson 3) and creates your `Application` object.
+4. **Every `ContentProvider` declared in your app's manifest is created, and its `onCreate` runs.** This is before `Application.onCreate`. Libraries that "work with no setup" are doing their setup here, from a provider you did not know they declared.
+5. `Application.onCreate`. Your first chance to be slow.
+6. Your Activity is created and your first frame is drawn. `am start -W` stops its clock here.
+
+That was a **cold start**: the process had to be created. If the process is still alive, the start is **warm** or **hot**, and steps 2 to 5 are skipped, which is most of the cost. That is why every measurement begins with `force-stop`. The official [App startup time](https://developer.android.com/topic/performance/vitals/launch-time) page defines all three and gives targets: cold under 500 ms, warm under 200 ms, hot under 150 ms.
+
+One more thing you need for step 4. The manifest inside your APK is not the file you wrote. It is your manifest **merged** with every library's manifest, and that is where the providers you never wrote come from. [Manage manifest files](https://developer.android.com/build/manage-manifests) explains the merge; you only need to know it exists and how to read it.
+
+### Seeing it, step by step
+
+#### Step 1: measure a cold start
+
+```bash
+adb shell am force-stop dev.firstprinciples.android
+adb shell am start -W -n dev.firstprinciples.android/.MainActivity
+```
+
+**What you should see:** `LaunchState: COLD` and a `TotalTime` in milliseconds. Run it three times and use the middle value; single runs vary.
+
+#### Step 2: start it again without force-stopping
+
+Run only the second command.
+
+**What you should see:** `LaunchState: HOT` and a `TotalTime` of a few tens of milliseconds.
+
+**Why:** the process and the Activity were both alive, so nothing was created. The two numbers are not comparable, which is why step 1 starts with `force-stop`.
+
+#### Step 3: add the slow provider and measure again
+
+Add `SlowLibraryProvider`, the manifest entry and the `App` log line. Repeat step 1.
+
+**What you should see:** `TotalTime` about 300 ms higher, and `adb logcat -d -s Startup` showing `provider onCreate` before `Application onCreate`.
+
+#### Step 4: find it without reading the source
+
+```bash
+apkanalyzer manifest print app/build/outputs/apk/debug/app-debug.apk | grep -A3 "<provider"
+```
+
+**What you should see:** your `SlowLibraryProvider`, and every provider your libraries declared, with class names.
+
+**Why:** this prints the merged manifest, which is the list of everything that runs at step 4. When startup gets slower after a dependency update and your code has not changed, this is where you look.
+
+#### Step 5: remove it and measure once more
+
+**What you should see:** `TotalTime` back near your baseline.
+
+### When it breaks
+
+**Startup got slower after a dependency update; your own code did not change.** The new library brought a `ContentProvider`. Step 4 finds it. Chapter 6 shows how to remove a merged provider you do not want.
+
+**Your numbers are all over the place.** Some runs were warm or hot. Check `LaunchState` every time.
+
+**The first launch after installing is slow, later ones are fine.** That is the runtime, not you; see the box below and chapter 11.
+
+**Fast on your phone, slow in reviews.** You measured a debug build on an expensive device. Measure a release build on the cheapest phone you own. Appendix C explains why one is worth buying.
+
+### Try it yourself
+
+Before you run it: instead of `force-stop`, press Home and run `adb shell am kill` from lesson 1, then `am start -W`. Predict the `LaunchState`.
+
+**Answer:** `COLD`, because the process was gone and had to be created. But the saved state survived `am kill`, so lesson 1's `Taps` comes back too. A cold start and restored state are two separate things, and this is the first time you have seen them together.
+
+### Words you met
+
+**Cold, warm and hot start**: cold creates the process; warm reuses it but rebuilds the screen; hot brings a living screen forward. [App startup time](https://developer.android.com/topic/performance/vitals/launch-time)
+
+**`am start -W`**: starts a screen and waits for its first frame, reporting `LaunchState` and `TotalTime`. [Android Debug Bridge](https://developer.android.com/tools/adb)
+
+**`ContentProvider` as a startup hook**: a component created before `Application.onCreate`, which libraries use to set themselves up. [Content providers](https://developer.android.com/guide/topics/providers/content-providers)
+
+**Merged manifest**: your manifest combined with every library's; the one that actually ships. [Manage manifest files](https://developer.android.com/build/manage-manifests)
+
+<Callout kind="note" title="Go deeper (optional)">
+Two names you will meet in chapter 11. The first frame is **time to initial display**; logcat records it as `Displayed dev.firstprinciples.android/.MainActivity: +431ms`. The moment your real content is on screen is **time to full display**, which only you can know, so you report it with `reportFullyDrawn()`. The [App Startup library](https://developer.android.com/topic/libraries/app-startup) replaces many library providers with one. And the very first launch after install is slowest because the Android runtime, **ART**, runs your code by interpreting it and only compiles the hot parts later; a **Baseline Profile** ships that list of hot parts so the compiling happens at install. [Baseline Profiles overview](https://developer.android.com/topic/performance/baselineprofiles/overview).
+</Callout>
+
+### Where this goes next
+
+Chapter 6 picks up at step 1: how `system_server` decides which part of your app to start, and why an app has no `main()`. The lesson below is optional; read it if you want to see the wall around your process with your own eyes.
+
+## The Activity lifecycle as a state machine
+
+Read it as a state machine with paired transitions rather than a list of methods.
+
+<Diagram
+  caption="The lifecycle as states, not callbacks. The solid return path is guaranteed; the dashed one is not — the OS may destroy the process from Stopped without ever calling onDestroy."
+  label="State machine of the Activity lifecycle: Created, Started, Resumed, with paired callbacks moving between them. From Stopped the process may be killed directly, so onDestroy is best-effort while onStop is guaranteed."
+>
+  <svg viewBox="0 0 660 300" width="660" height="300">
+    <rect x="30" y="60" width="132" height="46" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="96" y="80" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">CREATED</text>
+    <text x="96" y="95" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">exists, not visible</text>
+
+    <rect x="252" y="60" width="132" height="46" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="318" y="80" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">STARTED</text>
+    <text x="318" y="95" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">visible, not focused</text>
+
+    <rect x="474" y="60" width="132" height="46" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="540" y="80" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-accent)">RESUMED</text>
+    <text x="540" y="95" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">visible and focused</text>
+
+    <path d="M162 74h90" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M244 68 L252 74 L244 80" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="207" y="66" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">onStart</text>
+    <path d="M252 96h-90" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M170 90 L162 96 L170 102" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="207" y="122" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">onStop</text>
+
+    <path d="M384 74h90" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M466 68 L474 74 L466 80" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="429" y="66" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">onResume</text>
+    <path d="M474 96h-90" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M392 90 L384 96 L392 102" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="429" y="122" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">onPause</text>
+
+    <rect x="30" y="186" width="132" height="44" rx="8" fill="var(--dg-fill)" stroke="var(--dg-muted)" stroke-dasharray="4 3"/>
+    <text x="96" y="213" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-muted)">DESTROYED</text>
+    <path d="M96 106 L96 186" fill="none" stroke="var(--dg-muted)" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <path d="M90 178 L96 186 L102 178" fill="none" stroke="var(--dg-muted)" stroke-width="1.5"/>
+    <text x="108" y="152" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">onDestroy</text>
+    <text x="108" y="166" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">best effort only</text>
+
+    <rect x="366" y="186" width="264" height="44" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="498" y="205" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">PROCESS KILLED</text>
+    <text x="498" y="220" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">no further callbacks run at all</text>
+    <path d="M318 106 L318 208 L366 208" fill="none" stroke="var(--dg-warn)" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <path d="M358 202 L366 208 L358 214" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <text x="330" y="180" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">from stopped, at any time</text>
+
+    <text x="330" y="262" text-anchor="middle" font-family="var(--font-ui)" font-size="11.5" fill="var(--dg-muted)">onStop is the last callback you can rely on. Anything that must survive</text>
+    <text x="330" y="280" text-anchor="middle" font-family="var(--font-ui)" font-size="11.5" fill="var(--dg-muted)">is written by then, or it is not written at all.</text>
+  </svg>
+</Diagram>
+
+The callbacks pair: `onCreate`/`onDestroy`, `onStart`/`onStop`, `onResume`/`onPause`. Acquire in one, release in its partner, at the same level — a listener registered in `onStart` is unregistered in `onStop`, never in `onDestroy`.
+
+The asymmetry that matters is the last line of the diagram. **`onStop` is guaranteed. `onDestroy` is not.** When the OS reclaims your process (ch. 9's priority ladder), it kills it; no code of yours runs. So:
+
+- Persist in `onStop`, not `onDestroy`.
+- Treat `onDestroy` as tidying for the case where it does run, never as the place where correctness lives.
+- `onPause` should be *fast*. The next Activity cannot resume until it returns, so slow work there is a visible stutter on every navigation.
+
+Which callback should hold your work is usually answered by "what is the smallest window in which this must be true":
+
+| Work | Where | Why |
+|---|---|---|
+| Inflate, wire the ViewModel | `onCreate` | once per Activity instance |
+| Collect a flow, register a receiver | `onStart` / `onStop` | valid while visible; `repeatOnLifecycle` does it for you |
+| Camera, exclusive sensors | `onResume` / `onPause` | released the moment you lose focus |
+| Persist a draft | `onStop` | the last guaranteed moment |
+
+## Multi-window and the death of "resumed means visible"
+
+For years "resumed" and "visible" were the same thing in practice, and a lot of code assumed it. Multi-window ended that.
+
+In split screen, both Activities are **STARTED** — visible, drawing, updating. Only the one the user last touched is **RESUMED**. A video that pauses in `onPause` now pauses whenever the user taps the other pane, which is not what anyone wants. The rule became: *drive visible-content behaviour from `onStart`/`onStop`, and only exclusive-resource behaviour from `onResume`/`onPause`.*
+
+Picture-in-picture goes further: your Activity is visible in a small window while another app is fully resumed. `onPictureInPictureModeChanged` tells you to strip the UI down to the video. Foldables add postures — the same app spanning a hinge, or moving between an inner and outer display, which is a configuration change with a very different screen size on the other side.
+
+Android 15 <ApiLevel changedIn="35" /> stopped honouring `resizeableActivity="false"` on large screens, so "we do not support multi-window" is no longer an available position. Chapter 19 covers adaptive layout properly; here the point is narrower — **`onResume` does not mean "on screen", and it has not for a long time**.
+
+## Configuration changes
+
+A configuration change is the system telling you that the assumptions your UI was built under have changed: rotation, dark mode, locale, font scale, density, window size.
+
+The default response is to **destroy and recreate** the Activity. This looks wasteful and is actually the feature: resources are resolved by qualifier (ch. 19), so recreation is how a different layout, a different string, a different drawable get picked up. An Activity that survived a rotation would keep resources chosen for the old configuration.
+
+`android:configChanges` opts out, and it is *almost always the wrong answer*. Declaring `configChanges="orientation|screenSize"` means the system calls `onConfigurationChanged` and leaves your Activity standing — with resources it selected under the old configuration. You now own re-resolving all of them, and you will miss some. The legitimate uses are narrow: a full-screen video surface, a game rendering its own UI.
+
+The correct model is: **recreation is normal; make it cheap and make it lossless.** That is exactly what the next section is about. And note that recreation is not the hard case — process death is, and code that survives rotation frequently does not survive process death, because rotation preserves the `ViewModel` and process death does not.
+
+## Three tiers of state, and which to use
+
+The single most useful table in this chapter. There are three places state can live, and they survive different things.
+
+<Diagram
+  caption="Three tiers, three survival guarantees. Most state bugs are state kept one tier too low for what it must survive."
+  label="Matrix of three state tiers: remembered UI state survives nothing, ViewModel survives configuration change, SavedStateHandle survives process death, and persisted storage survives everything including reinstall."
+>
+  <svg viewBox="0 0 660 292" width="660" height="292">
+    <text x="424" y="26" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">ROTATION</text>
+    <text x="516" y="26" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">PROCESS DEATH</text>
+    <text x="608" y="26" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">REINSTALL</text>
+    <rect x="10" y="38" width="640" height="52" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="24" y="60" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">remember, a field in the Composable</text>
+    <text x="24" y="77" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">scroll offset, an expanded row</text>
+    <text x="424" y="70" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-warn)">no</text>
+    <text x="516" y="70" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-warn)">no</text>
+    <text x="608" y="70" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-warn)">no</text>
+    <rect x="10" y="98" width="640" height="52" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="24" y="120" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">ViewModel</text>
+    <text x="24" y="137" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">loaded list, in-flight request</text>
+    <text x="424" y="130" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-ok)">yes</text>
+    <text x="516" y="130" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-warn)">no</text>
+    <text x="608" y="130" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-warn)">no</text>
+    <rect x="10" y="158" width="640" height="52" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="24" y="180" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">SavedStateHandle, onSaveInstanceState</text>
+    <text x="24" y="197" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">the id being viewed, a query — small, parcelable</text>
+    <text x="424" y="190" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-ok)">yes</text>
+    <text x="516" y="190" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-ok)">yes</text>
+    <text x="608" y="190" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-warn)">no</text>
+    <rect x="10" y="218" width="640" height="52" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="24" y="240" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">Room, DataStore, files</text>
+    <text x="24" y="257" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">the draft, settings, cached content</text>
+    <text x="424" y="250" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-ok)">yes</text>
+    <text x="516" y="250" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-ok)">yes</text>
+    <text x="608" y="250" text-anchor="middle" font-family="var(--font-mono)" font-size="14" fill="var(--dg-ok)">yes</text>
+  </svg>
+</Diagram>
+
+The same field, in all three, to make the distinction concrete. A search screen with a query, results, and a scroll position:
+
+```kotlin
+class SearchViewModel(private val saved: SavedStateHandle) : ViewModel() {
+
+    // Tier 3: survives process death. Small, parcelable, the seed of everything else.
+    val query: StateFlow<String> = saved.getStateFlow("query", "")
+
+    // Tier 2: survives rotation, rebuilt after process death from the query above.
+    val results: StateFlow<List<Article>> = query
+        .debounce(300)
+        .flatMapLatest { repo.search(it) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun onQueryChanged(value: String) { saved["query"] = value }
+}
+```
+
+```kotlin
+// Tier 1: survives neither, and does not need to — except scroll position,
+// which rememberSaveable pushes down into tier 3 for you.
+val listState = rememberLazyListState()
+```
+
+The design rule: **put the smallest thing that can regenerate everything else into tier 3, and derive the rest.** Saving the results list would be both too large for the Binder buffer (ch. 2) and stale on restore. Saving the query is a few dozen bytes and reproduces the screen exactly.
+
+`onSaveInstanceState` is the same tier for Views: called before the Activity becomes killable, and the `Bundle` goes to `system_server`, so it crosses Binder and is subject to the transaction limit. A large object there is `TransactionTooLargeException` at the worst possible moment.
+
+## Process death, properly
+
+This is the part that is almost never tested and routinely broken in shipped apps.
+
+When the OS needs memory it kills processes by priority (ch. 9). Your backgrounded app is a prime candidate. The user is not told; from their side the app is simply "still there". When they return, the system **recreates your task from saved state** — the same Activity, the same `Bundle`, a brand-new process.
+
+That new process has, per chapter 2, freshly initialised statics, an empty `ViewModel`, no in-memory cache, and no singletons holding anything. If your code assumed any of those persisted, it fails here and only here.
+
+The reason this escapes testing is that the natural gestures do not reproduce it:
+
+| Gesture | What actually happens |
+|---|---|
+| Rotate | Activity recreated, `ViewModel` **kept** |
+| Home, then return | often nothing at all — the process is still warm |
+| Swipe from Recents | task removed; usually **not** the same as process death |
+| `adb shell am kill <pkg>` | **the real thing** — process killed, saved state kept |
+| Force stop | process killed *and* saved state discarded — not the case you want |
+
+```
+# The only reliable reproduction. Background the app first (press Home).
+$ adb shell am kill dev.firstprinciples.android
+$ adb shell dumpsys activity processes | grep dev.firstprinciples   # gone
+
+# then tap the app icon: the task is restored into a new process
+```
+
+The developer option **"Don't keep activities"** destroys every Activity as soon as it is left. It is a good approximation of configuration-change loss and a *poor* approximation of process death, because the process survives and so does the `ViewModel`. Use `am kill`.
+
+<Callout kind="danger" title="Never do this">
+Do not use a global mutable singleton — a static cache, an object holding the logged-in user — as the source of truth for something the UI needs on restore. After process death it is empty, the UI is restored, and the two disagree. This is the single most common cause of "sometimes it shows a blank screen and I cannot reproduce it".
+</Callout>
+
+## Lifecycle-aware components
+
+Rather than each component tracking callbacks by hand, `Lifecycle` exposes the state and lets observers react — which is how a library can start and stop with your screen without you wiring anything.
+
+`DefaultLifecycleObserver` is the interface; `lifecycleScope` and `viewLifecycleOwner.lifecycleScope` are `CoroutineScope`s cancelled when their owner is destroyed.
+
+The important API is **`repeatOnLifecycle`**:
+
+```kotlin
+viewLifecycleOwner.lifecycleScope.launch {
+    viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        viewModel.state.collect(::render)     // cancelled at STOP, restarted at START
+    }
+}
+```
+
+It *cancels* the block when the lifecycle drops below the given state and *runs it again* when it returns. That is what you want for a flow: no collection while backgrounded, so no work and no updates to an invisible UI.
+
+`launchWhenStarted` looked equivalent and was not — it **suspended** rather than cancelling, so the upstream flow kept producing and the values queued up, delivering a burst on return. It is deprecated for that reason. If you see it, replace it.
+
+`LiveData` is lifecycle-aware by construction, which is its main advantage; `StateFlow` is not, which is why it needs `repeatOnLifecycle`. Chapter 12 compares them properly.
+
+## ViewModel
+
+A `ViewModel` is narrower than it is usually described. It is **an object scoped to a `ViewModelStoreOwner`, with an `onCleared` callback**, retained across configuration changes.
+
+That is all. It is not a magic persistence layer, and it does not survive process death — only `SavedStateHandle` inside it does.
+
+The retention works because the `ViewModelStore` is handed to the new Activity instance during recreation. Its scope is whatever owner you resolve it from:
+
+```kotlin
+private val vm: FeedViewModel by viewModels()                       // this Fragment
+private val shared: FilterViewModel by activityViewModels()         // the Activity — shared between Fragments
+private val graph: CheckoutViewModel by navGraphViewModels(R.id.checkout)  // the nav graph (ch. 7)
+```
+
+`activityViewModels()` is how sibling Fragments share state without an interface between them. `navGraphViewModels` scopes to a flow, so the state disappears when the flow is left — the right shape for a multi-step checkout.
+
+**What must not go in a ViewModel:** anything holding a `Context`, a `View`, an `Activity` or a `Fragment`. The ViewModel outlives the Activity across rotation, so a reference to one leaks it. `AndroidViewModel` provides the `Application` context, which is safe because it is process-scoped anyway. If a ViewModel needs a `Context` for anything else, that is usually a sign the work belongs in the data layer (ch. 14).
+
+`onCleared` runs when the owner goes away for good — the place to cancel anything not already in `viewModelScope`.
+
+## Tasks, the back stack &amp; predictive back
+
+Two stacks, not one, and confusing them causes navigation bugs that are hard to reproduce.
+
+The **task** is an OS-level stack of Activities the user perceives as one app session; Recents shows tasks. Inside a single-Activity app, the **in-app back stack** of destinations is managed by Navigation (ch. 7). Back pops the in-app stack until it is empty, then pops the task.
+
+**Launch modes** change how a new Activity relates to the task:
+
+| Mode | Behaviour | Use when |
+|---|---|---|
+| `standard` | a new instance every time | almost always |
+| `singleTop` | reuses the instance if already on top, calls `onNewIntent` | a notification re-opening the current screen |
+| `singleTask` | one instance in a task; clears everything above it | rarely; a true entry point |
+| `singleInstance` | alone in its own task | almost never |
+
+The trap with anything other than `standard`: **`onCreate` is not called again**, so an Activity that reads `intent` only in `onCreate` will keep showing the old content. Handle `onNewIntent` and update `intent` there.
+
+`taskAffinity` decides which task an Activity belongs to. Changing it is how apps accidentally end up with Activities in each other's tasks — the task-hijacking surface from chapter 6. Leave it alone.
+
+**Up is not back.** Back is chronological, the reverse of what the user did. Up is hierarchical, the parent screen. Arriving from a deep link they differ: back should leave, up should go to the parent — which means synthesising a back stack, as chapter 7 covers.
+
+**Predictive back** <ApiLevel min="33" /> shows the destination behind the gesture as the user swipes, and requires opting in with `android:enableOnBackInvokedCallback="true"`. The migration is from `onBackPressed` to `OnBackPressedDispatcher`: the old callback is invoked only when the gesture *commits*, so the system has nothing to animate ahead of time. A `BackHandler` that always intercepts breaks the prediction — enable it only while it genuinely has something to handle.
+
+## Failure modes: Lifecycle & process death
+
+**A blank or half-populated screen that nobody can reproduce.** *Symptom:* rare crash-free-user dips and reports of "it lost my place"; never happens in development. *Cause:* process death. The UI restored, the `ViewModel` and statics did not. *Fix:* put the seed of the screen in `SavedStateHandle` and derive the rest; verify with `adb shell am kill`, not by swiping Recents.
+
+**`TransactionTooLargeException` on backgrounding.** *Symptom:* a crash cluster when the user leaves the app, worse for power users. *Cause:* a large object in `onSaveInstanceState` or `SavedStateHandle`; the `Bundle` crosses Binder to `system_server` (ch. 2). *Fix:* save an id, load the data.
+
+**A Fragment leaks its view, or updates a dead one.** *Symptom:* growing memory across navigation, or `NullPointerException` in a collector after going back. *Cause:* the binding held in a Fragment field, or `this` used as the lifecycle owner instead of `viewLifecycleOwner`. *Fix:* null the binding in `onDestroyView`; scope everything view-related to `viewLifecycleOwner`.
+
+**A burst of stale updates when returning to a screen.** *Symptom:* the UI flickers through several states on resume. *Cause:* `launchWhenStarted`, which suspends rather than cancels, so buffered emissions all arrive at once. *Fix:* `repeatOnLifecycle(STARTED)`.
+
+**Video pauses when the user taps the other split-screen pane.** *Symptom:* playback stops although the video is still on screen. *Cause:* pausing in `onPause`, which now fires on focus loss rather than visibility loss. *Fix:* drive it from `onStop`.
+
+**A notification opens the right screen showing the wrong item.** *Symptom:* the previously-viewed content appears. *Cause:* `singleTop`/`singleTask` reused the instance, so `onCreate` did not run and the old `intent` is still in place. *Fix:* implement `onNewIntent` and call `setIntent`.
+
+**`IllegalStateException` committing a Fragment transaction.** *Symptom:* a crash from a network or timer callback. *Cause:* a commit after `onSaveInstanceState`. *Fix:* drive UI from state the Fragment observes, rather than committing from an async callback. `commitAllowingStateLoss` hides it and loses the change.
+
+## Cheat-sheet: Lifecycle & process death
+
+```bash
+# the only honest process-death test: background the app FIRST, then
+adb shell am kill <pkg>                 # kills, KEEPS saved state — the real case
+adb shell am force-stop <pkg>           # kills AND discards state — not the same test
+adb shell dumpsys activity processes | grep <pkg>
+
+# what the system thinks your task looks like
+adb shell dumpsys activity activities | sed -n '/Task{/,/Run #0/p'
+adb shell dumpsys activity top | head -40      # the resumed Activity and its state
+
+# configuration changes without touching the device
+adb shell settings put system font_scale 2.0
+adb shell cmd uimode night yes
+adb shell wm size 1080x2400 && adb shell wm density 420   # reset with 'wm size reset'
+```
+
+| Must survive | Put it in |
+|---|---|
+| nothing — a frame | `remember`, a local |
+| rotation | `ViewModel` |
+| process death | `SavedStateHandle` / `onSaveInstanceState` — small, parcelable |
+| everything | Room, DataStore, a file (ch. 15) |
+
+| Symptom | Look at |
+|---|---|
+| lost state after returning later | process death, tier 3 |
+| lost state on rotation | not in a `ViewModel` |
+| leak across navigation | Fragment view lifecycle |
+| stale burst on resume | `launchWhenStarted` |
+| wrong item from a notification | `onNewIntent` |
+
+<LabCard module=":ch04-lifecycle">
+Build one screen with a half-typed form field and a scroll position, and make it correct across all four cases: rotation, backgrounding and return, real process death via `adb shell am kill`, and "clear from recents". Prove each with adb rather than by hand-waving — the point of the lab is that three of the four are easy and the third is the one that ships broken. Then deliberately break it by moving the field into a static singleton, and watch exactly which of the four cases fails.
+</LabCard>

@@ -1,0 +1,30 @@
+{
+  "title": "One app, two processes",
+  "desc": "A drawing of an app file on disk, the process created to run it, the saved screen description kept outside that process, and a second process created later with a new number and empty memory.",
+  "steps": [
+    {
+      "show": ["apk"],
+      "note": "Your app is a file on disk. None of your code is running yet."
+    },
+    {
+      "show": ["apk", "arrow-1", "process-1"],
+      "note": "Android needs to run it, so the kernel creates a process and gives it a number."
+    },
+    {
+      "show": ["process-1", "memory-1"],
+      "note": "Everything your code makes lives in that process: objects, singletons, threads."
+    },
+    {
+      "show": ["process-1", "saved"],
+      "note": "Before your app goes to the background, the system writes down a small description of the screen, outside your process."
+    },
+    {
+      "show": ["process-1", "kill"],
+      "note": "Memory runs short while the user is elsewhere. The process ends, and none of your code runs."
+    },
+    {
+      "show": ["arrow-2", "process-2", "memory-2", "saved"],
+      "note": "The user comes back. New process, new number, empty memory, screen rebuilt from the description."
+    }
+  ]
+}

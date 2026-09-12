@@ -1,0 +1,17 @@
+---
+/**
+ * Where one of the three mid-lesson questions lands.
+ *
+ * The questions live in the lesson's `quiz.json`, so this component has no
+ * content of its own: it marks a slot, and the lesson layout (which reads the
+ * quiz) moves the matching question into it. With JavaScript off the three
+ * questions stay where the layout rendered them, at the end of the lesson,
+ * which is why they are server-rendered rather than built in the browser.
+ */
+interface Props {
+  /** 1, 2 or 3, in document order. */
+  n: number;
+}
+const { n } = Astro.props;
+---
+<div class="check-slot" data-check={n}></div>

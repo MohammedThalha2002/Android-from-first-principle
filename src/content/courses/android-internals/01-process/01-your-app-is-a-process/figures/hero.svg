@@ -1,0 +1,67 @@
+<svg viewBox="0 0 700 336" role="img" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="dg-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-line)"/>
+    </marker>
+  </defs>
+
+  <g data-part="saved">
+    <rect x="208" y="8" width="300" height="50" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="358" y="28" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">Saved screen description</text>
+    <text x="358" y="46" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">kept outside the process</text>
+    <path d="M262 78 V 62" fill="none" stroke="var(--dg-accent)" stroke-width="1.5" marker-end="url(#dg-arrow)"/>
+    <path d="M456 62 V 78" fill="none" stroke="var(--dg-accent)" stroke-width="1.5" marker-end="url(#dg-arrow)"/>
+  </g>
+
+  <g data-part="apk">
+    <rect x="14" y="150" width="118" height="70" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="73" y="180" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">base.apk</text>
+    <text x="73" y="200" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">on disk</text>
+  </g>
+
+  <g data-part="arrow-1">
+    <path d="M136 185 H 168" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow)"/>
+  </g>
+
+  <g data-part="process-1">
+    <rect x="174" y="78" width="208" height="212" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="278" y="104" text-anchor="middle" font-family="var(--font-mono)" font-size="13" fill="var(--dg-label)">Process 9871</text>
+  </g>
+
+  <g data-part="memory-1">
+    <rect x="190" y="118" width="176" height="34" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="278" y="139" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">objects you created</text>
+    <rect x="190" y="160" width="176" height="34" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="278" y="181" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">companion object values</text>
+    <rect x="190" y="202" width="176" height="34" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="278" y="223" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">threads and coroutines</text>
+    <text x="278" y="264" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">all of this is memory</text>
+  </g>
+
+  <g data-part="kill">
+    <path d="M182 86 L 374 282" fill="none" stroke="var(--dg-warn)" stroke-width="2.5"/>
+    <path d="M374 86 L 182 282" fill="none" stroke="var(--dg-warn)" stroke-width="2.5"/>
+    <text x="278" y="312" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-warn)">system needs memory</text>
+    <text x="278" y="328" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">none of your code runs</text>
+  </g>
+
+  <g data-part="arrow-2">
+    <path d="M388 185 H 444" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow)"/>
+    <text x="416" y="176" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">later</text>
+  </g>
+
+  <g data-part="process-2">
+    <rect x="452" y="78" width="208" height="212" rx="8" fill="var(--dg-fill)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="556" y="104" text-anchor="middle" font-family="var(--font-mono)" font-size="13" fill="var(--dg-label)">Process 10203</text>
+  </g>
+
+  <g data-part="memory-2">
+    <rect x="468" y="118" width="176" height="34" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="556" y="139" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">no objects yet</text>
+    <rect x="468" y="160" width="176" height="34" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="556" y="181" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">companion object reset</text>
+    <rect x="468" y="202" width="176" height="34" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1"/>
+    <text x="556" y="223" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">screen from saved state</text>
+    <text x="556" y="264" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">new number, empty memory</text>
+  </g>
+</svg>

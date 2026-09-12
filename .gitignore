@@ -1,0 +1,28 @@
+# build output
+dist/
+# Astro's generated types and content-layer cache. The cache is keyed by
+# chapter id, so it goes stale whenever chapters are moved or renamed —
+# committing it would ship that staleness to everyone. `npm run clean`
+# removes it; the dev server rebuilds it on the next start.
+.astro/
+# dependencies
+node_modules/
+# local env: PUBLIC_SUPABASE_URL / PUBLIC_SUPABASE_PUBLISHABLE_KEY
+.env
+.env.production
+# macOS
+.DS_Store
+
+# Working notes, plans and archives. These are how the course gets written,
+# not part of it: internal maps, superseded drafts and personal material.
+docs/
+
+# The authoring tooling for this repo's maintainer. Everything a contributor
+# needs is in CONTRIBUTING.md, AGENTS.md and LESSON_TEMPLATE.md at the root.
+.claude/
+CLAUDE.md
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.log

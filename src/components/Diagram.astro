@@ -1,0 +1,65 @@
+---
+/**
+ * Wrapper for an inline-SVG diagram.
+ *
+ * Diagrams are content, not screenshots: they are written as SVG so they stay
+ * searchable, selectable, diffable in review and free to re-theme. The rules
+ * the artwork must follow live in docs/CONTENT_PLAN.md and are enforced by
+ * tests/diagram-contrast.test.js — no literal colours, no unshipped fonts, no
+ * markdown emphasis characters inside <text>.
+ *
+ * `label` is what a screen reader announces INSTEAD of every tspan in the
+ * drawing, so it must state the finding, not the medium: "Activity lifecycle
+ * state machine: onStop is guaranteed, onDestroy is not" rather than
+ * "diagram of the lifecycle".
+ */
+interface Props {
+  /** One sentence naming what the diagram shows. Rendered beneath it. */
+  caption?: string;
+  /** Screen-reader summary. Falls back to the caption. */
+  label?: string;
+}
+
+const { caption, label } = Astro.props;
+const ariaLabel = label ?? caption;
+---
+
+<figure class="diagram">
+  <div class="diagram-canvas" role="img" aria-label={ariaLabel}>
+    <slot />
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+  .diagram {
+    margin: var(--space-6) 0;
+    max-width: var(--measure-wide);
+  }
+
+  /* The scroll container is the canvas, not the figure, so a wide diagram
+     never drags the caption sideways with it. */
+  .diagram-canvas {
+    background: var(--dg-ground);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow-x: auto;
+    padding: var(--space-5);
+  }
+
+  .diagram-canvas :global(svg) {
+    display: block;
+    height: auto;
+    margin: 0 auto;
+    max-width: 100%;
+  }
+
+  figcaption {
+    color: var(--ink-3);
+    font-family: var(--font-ui);
+    font-size: var(--text-sm);
+    line-height: var(--leading-snug);
+    margin-top: var(--space-3);
+    max-width: var(--measure);
+  }
+</style>

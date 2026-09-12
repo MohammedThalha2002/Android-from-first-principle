@@ -1,0 +1,193 @@
+---
+title: "Kotlin Multiplatform & Sharing Code"
+navTitle: "A · Multiplatform"
+summary: "Optional, and deliberately an appendix: a delivery strategy, not a fundamental."
+readingTime: "1 hour"
+minutes: 55
+tags: ["kotlin multiplatform","expect actual","source sets","hierarchical project structure","ktor","sqldelight","room kmp","xcframework","swift interop","compose multiplatform","shared module","cost accounting"]
+draft: true
+date: "2026-08-22"
+subtopic: "android-internals"
+subtopicOrder: 21
+part: "appendix"
+kind: "appendix"
+verifiedAgainst: "Kotlin 2.3 · KMP tooling as of 2026-09"
+stage: "outline"
+sources: ["26-appendix-a-kotlin-multiplatform#What is worth sharing","26-appendix-a-kotlin-multiplatform#`expect`/`actual`, source sets","26-appendix-a-kotlin-multiplatform#Adding a KMP module to an existing app","26-appendix-a-kotlin-multiplatform#Compose Multiplatform","26-appendix-a-kotlin-multiplatform#The honest cost accounting","26-appendix-a-kotlin-multiplatform#Failure modes","26-appendix-a-kotlin-multiplatform#Cheat-sheet"]
+---
+This appendix is last, and optional, on purpose. Kotlin Multiplatform is a **delivery strategy** — a decision about how a team ships to more than one platform — not a fundamental of Android engineering. Everything in the twenty-five chapters before it is true whether or not you ever use KMP.
+
+It is here because the question comes up on every team eventually, and it deserves an answer with the costs stated rather than only the benefits.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## What is worth sharing
+
+The dividing line is sharper than most write-ups admit: **share what is decided, not what is felt.**
+
+**Worth sharing** — the parts where iOS and Android should agree, and where a difference is a bug:
+
+- **Models and validation.** An email is valid or not; that answer must not differ by platform.
+- **Business rules.** Pricing, eligibility, state machines. Divergence here is a defect users can see.
+- **Networking.** The API contract is one contract; two clients drifting is a real source of bugs.
+- **Persistence and sync.** Chapter 17's offline logic — the outbox, ordering, conflict rules — is intricate, easy to get subtly wrong, and identical on both platforms. This is the strongest case for KMP.
+
+**Not worth sharing** — anything where the platforms *should* differ:
+
+- **UI.** Navigation, gestures and conventions differ, and users notice. Chapter 19's adaptive layout and chapter 7's back stack have no iOS equivalent.
+- **Platform integration.** Permissions, background execution (ch. 9), push (ch. 9) — the models are genuinely different, so sharing produces an abstraction that fits neither.
+- **Anything with a native idiom.** Sharing it produces code that reads as foreign in both languages.
+
+The high-value core is roughly: models, validation, business rules, networking, persistence, sync. That is often 30–50 % of an app's code, and disproportionately the part where a bug is expensive.
+
+<Diagram
+  caption="Share downwards, not upwards. The line sits where behaviour stops being a platform question and starts being a product decision — everything below it should be identical on both platforms, and a difference is a bug."
+  label="Layer diagram of a Kotlin Multiplatform app: separate Android and iOS user interfaces and platform integrations at the top, a thin androidMain and iosMain binding layer beneath, and a single shared common module underneath holding models, validation, business rules, networking, persistence and sync."
+>
+  <svg viewBox="0 0 660 268" width="660" height="268">
+    <rect x="24" y="26" width="284" height="52" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="166" y="48" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">ANDROID UI</text>
+    <text x="166" y="66" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">Compose, back stack, permissions</text>
+
+    <rect x="352" y="26" width="284" height="52" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="494" y="48" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">iOS UI</text>
+    <text x="494" y="66" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">SwiftUI, its own navigation</text>
+
+    <text x="330" y="96" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-warn)">SHOULD differ — users notice. Sharing this produces an abstraction that fits neither.</text>
+
+    <rect x="24" y="108" width="284" height="34" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-line)"/>
+    <text x="166" y="129" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">androidMain — thin bindings</text>
+    <rect x="352" y="108" width="284" height="34" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-line)"/>
+    <text x="494" y="129" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">iosMain — thin bindings</text>
+
+    <rect x="24" y="156" width="612" height="70" rx="10" fill="var(--dg-fill-2)" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="330" y="180" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-ok)">commonMain — ONE implementation</text>
+    <text x="330" y="200" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">models and validation, business rules, the API contract,</text>
+    <text x="330" y="216" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">persistence, and chapter 17 offline sync — the strongest case of all</text>
+
+    <path d="M166 142 L166 156M494 142 L494 156" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <text x="330" y="248" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">Roughly 30 to 50 percent of the code, and disproportionately the expensive half.</text>
+    <text x="330" y="264" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">A team that shares upward instead ships a thin module and pays the cost anyway.</text>
+  </svg>
+</Diagram>
+
+## `expect`/`actual`, source sets
+
+The mechanism for "mostly shared, with a platform-specific piece".
+
+```kotlin
+// commonMain
+expect class KeyValueStore {
+    suspend fun put(key: String, value: String)
+    suspend fun get(key: String): String?
+}
+
+// androidMain — DataStore (ch. 15)
+actual class KeyValueStore(private val context: Context) { /* ... */ }
+
+// iosMain — NSUserDefaults or the Keychain
+actual class KeyValueStore { /* ... */ }
+```
+
+**Prefer an interface with platform implementations over `expect`/`actual`** where you can. `expect`/`actual` is a compiler-level binding with no seam for testing; a plain interface injected through your DI graph (ch. 14) is easier to fake and easier to reason about. Keep `expect`/`actual` for genuinely low-level bindings.
+
+**Hierarchical source sets** let intermediate sets share code between some targets — `iosMain` shared by `iosArm64` and `iosSimulatorArm64`, an `appleMain` above it — so you rarely write the same thing twice.
+
+**The common dependency stack** is mature for the layers worth sharing: **Ktor Client** for HTTP (ch. 16), **SQLDelight** or Room's KMP support for persistence (ch. 15), **kotlinx.serialization** (ch. 12, ch. 16), **kotlinx.coroutines** (ch. 12) and **kotlinx-datetime**. Those cover the high-value core.
+
+## Adding a KMP module to an existing app
+
+The realistic path, and the one that keeps the decision reversible.
+
+**Do not convert your app.** Add a **new module** — `:shared` — that is a KMP module, and move one well-bounded piece into it. From Android's side it is an ordinary Gradle module producing an ordinary library, so the rest of the app does not change (ch. 20).
+
+Start with something self-contained and valuable: a validation library, or the network layer for one feature. Ship it. Only then decide whether to move more.
+
+**Consuming it from iOS** is where the real cost lives:
+
+- The module is packaged as an **XCFramework** and added to the Xcode project.
+- **Swift interop is imperfect.** Kotlin `sealed` hierarchies do not become Swift enums; generics are erased at the boundary; nullability maps to optionals but not always as you would want; and everything arrives inside a module-prefixed namespace. It is workable, and it does not feel native. Recent Swift-export work is improving this, and it is worth checking current state rather than trusting a year-old opinion.
+- **`suspend` functions** map to completion handlers or Swift async, and `Flow` needs a wrapper. Libraries exist; there is glue.
+- **The memory model** is unified with the JVM's since Kotlin 1.7, which removed the old freezing rules — one of the largest historical objections is gone.
+- **Debugging across the boundary** means a Kotlin stack trace inside an iOS crash report, which needs symbolication set up deliberately (ch. 20).
+
+## Compose Multiplatform
+
+Maturity differs sharply by target, and it is worth being precise.
+
+| Target | State |
+|---|---|
+| Android | it is Jetpack Compose — production |
+| Desktop | stable and used in production |
+| iOS | stable, and a real decision rather than a free one |
+| Web (Wasm) | improving; evaluate for the specific case |
+
+For iOS the honest framing: Compose Multiplatform genuinely works, and choosing it means your iOS UI is not UIKit or SwiftUI. That has consequences for platform-native feel, for accessibility integration, for hiring, and for how easily an iOS engineer can contribute.
+
+**Native UI is still correct** when the app must feel unmistakably native, when you have an existing iOS team and codebase, or when you depend on platform UI components with no Compose equivalent. Sharing logic and writing two UIs is the lower-risk configuration, and it is what most teams adopting KMP actually do.
+
+## The honest cost accounting
+
+The section this appendix exists for.
+
+**Build complexity.** A KMP build is meaningfully more complex than an Android one: more source sets, more targets, longer builds, and Gradle problems that are harder to diagnose (ch. 20). Xcode enters your build pipeline.
+
+**Tooling maturity.** Android Studio handles the Android side well. Debugging shared code *from Xcode*, and IDE support in the iOS project, remain rougher than either platform alone.
+
+**Hiring and team shape.** You need people comfortable with Kotlin **and** the iOS platform. It works best where one team owns a feature on both platforms; it works badly where separate iOS and Android teams must now coordinate on a shared module neither fully owns. **This is usually the deciding factor, and it is organisational rather than technical.**
+
+**Debugging across languages.** A bug in shared code reported from iOS is investigated in Kotlin, reproduced from Swift, and fixed in a module both platforms consume. That is slower than a single-platform loop.
+
+**Where it pays off:**
+
+- A team of roughly five or more where the same people own both platforms.
+- Substantial, intricate business logic — sync (ch. 17), offline, pricing, complex state.
+- A long-lived product where divergence between platforms has already caused bugs.
+- An existing Kotlin-strong team.
+
+**Where it does not:**
+
+- One platform, or one platform that matters.
+- Separate teams with separate roadmaps.
+- A thin client that is mostly UI over a well-designed API — there is little to share.
+- A short-lived or exploratory product, where the setup cost is not recovered.
+
+The reasonable default for most Android teams: **share the logic, keep the UI native, and start with one bounded module.** That captures most of the benefit at a fraction of the risk, and it is straightforward to reverse.
+
+## Failure modes: A · Multiplatform
+
+**Six months in, less is shared than expected.** *Symptom:* the shared module is thin, the cost was paid anyway. *Cause:* trying to share UI or platform integration. *Fix:* share the decided, not the felt.
+
+**The iOS team resents the shared module.** *Symptom:* iOS engineers avoid or work around it. *Cause:* separate teams, a module owned by neither, awkward Swift interop. *Fix:* an organisational answer — shared ownership, or do not adopt KMP.
+
+**Build times become the main complaint.** *Symptom:* slower loops on both platforms. *Cause:* multiplatform builds are heavier. *Fix:* chapter 20's tooling; keep the shared module bounded.
+
+**A Kotlin idiom is unusable from Swift.** *Symptom:* awkward call sites, sealed hierarchies as opaque classes. *Cause:* interop does not preserve everything. *Fix:* design the shared *API surface* for both callers — simple types, few generics, explicit result types.
+
+**A crash in shared code is unreadable in an iOS report.** *Symptom:* frames with no symbols (ch. 20). *Cause:* symbolication not configured for the framework. *Fix:* upload the symbols in CI.
+
+## Cheat-sheet: A · Multiplatform
+
+```kotlin
+// shared source layout
+commonMain/     models, validation, business rules, networking, persistence
+androidMain/    DataStore, Android-specific actuals
+iosMain/        Keychain, iOS actuals
+commonTest/     tests that run on every target
+
+// prefer this
+interface KeyValueStore { suspend fun get(key: String): String? }   // inject it (ch. 14)
+// over this, unless you need a compiler-level binding
+expect class KeyValueStore
+```
+
+| Question | Answer |
+|---|---|
+| what to share | models, validation, rules, networking, persistence, sync |
+| what not to share | UI, permissions, background work, push |
+| how to start | one bounded `:shared` module, one feature |
+| UI on iOS | native, unless you have a specific reason |
+| the deciding factor | team shape, not technology |

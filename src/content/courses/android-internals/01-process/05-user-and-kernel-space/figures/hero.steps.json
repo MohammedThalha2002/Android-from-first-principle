@@ -1,0 +1,12 @@
+{
+  "title": "The only door out of a process",
+  "desc": "A drawing of an app in user space, the system call that is its only way into kernel space, the check the kernel makes on who is asking, and the hardware on the far side.",
+  "steps": [
+    { "show": ["user-band", "app"], "note": "Your app runs in user space, where most of the machine does not respond to it." },
+    { "show": ["app", "syscall", "kernel-band"], "note": "To do anything outside its own memory it makes a system call, which switches the processor into kernel mode." },
+    { "show": ["kernel-band", "check"], "note": "The kernel sees which Linux user the calling process runs as, and what it is asking for." },
+    { "show": ["check", "hardware"], "note": "If the ids match, the kernel does the work and hands the result back across the door." },
+    { "show": ["check", "blocked"], "note": "If they do not, the call fails there. Your code never came near the file or the device." },
+    { "show": ["app", "syscall", "binder"], "note": "Binder is a driver in the kernel, so talking to another process uses the same door." }
+  ]
+}

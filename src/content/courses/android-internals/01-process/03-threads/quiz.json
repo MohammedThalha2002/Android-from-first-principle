@@ -1,0 +1,78 @@
+{
+  "lesson": "1.3",
+  "title": "Threads: many paths through one process",
+  "questions": [
+    {
+      "stage": "pre",
+      "question": "You update a TextView from a background thread and the app crashes with CalledFromWrongThreadException. Why does only one thread get to touch views?",
+      "options": [
+        "Views are stored in memory only that thread can reach",
+        "Android reserves the other threads for system work",
+        "The toolkit has no locks, so allowing two threads at once would corrupt it",
+        "Background threads run at a lower priority and could be interrupted mid-update"
+      ],
+      "correct": 2,
+      "explanation": "All threads in a process share the same memory, so reaching a view from another thread is technically possible and that is the problem. The platform chose no locks in the drawing path plus one permitted thread, over locking every view on every frame."
+    },
+    {
+      "stage": "check",
+      "question": "Two threads in the same process. Which statement is true?",
+      "options": [
+        "Each gets its own copy of the objects on the heap",
+        "They share the address space, and each has its own stack",
+        "Only the main thread may allocate objects",
+        "They need a lock before either can read shared memory"
+      ],
+      "correct": 1,
+      "explanation": "They run through one address space with one page table, so an object made on either is visible to both at the same address. The separate stacks are why a stack trace always belongs to exactly one thread."
+    },
+    {
+      "stage": "check",
+      "question": "A developer moves a slow database read into viewModelScope.launch { } and the screen still freezes. Why?",
+      "options": [
+        "viewModelScope is cancelled when the screen rotates",
+        "Room holds a lock that blocks every thread while it reads",
+        "Coroutines only move work off the main thread in release builds",
+        "The body starts on the main dispatcher, so the call is still on the main thread"
+      ],
+      "correct": 3,
+      "explanation": "Starting a coroutine is not the same as leaving the thread. viewModelScope begins on the main dispatcher, and the work stays there until a dispatcher or a suspending library call moves it."
+    },
+    {
+      "stage": "check",
+      "question": "Your app throws NetworkOnMainThreadException, but reading a large file on the main thread throws nothing. Why the difference?",
+      "options": [
+        "File reads are always fast enough to be safe",
+        "A network call has no bound on how long it takes, so the platform refuses it outright",
+        "File access is handled by a background thread automatically",
+        "The file API predates the check and was never updated"
+      ],
+      "correct": 1,
+      "explanation": "The platform refuses the one operation whose duration is entirely outside the device's control. A slow file read is allowed and simply freezes the screen, which is why StrictMode exists to point it out rather than an exception."
+    },
+    {
+      "stage": "post",
+      "question": "A crash report contains a single stack trace. What does it tell you about the rest of the app?",
+      "options": [
+        "That all threads were in the same state",
+        "Nothing: a stack belongs to one thread, and another could have caused the problem",
+        "That the other threads were idle",
+        "That the crash happened on the main thread"
+      ],
+      "correct": 1,
+      "explanation": "A stack is one path through the process, not a picture of it. This is why an artefact that captures every thread at once is a different kind of evidence, and why two-thread bugs rarely show both threads."
+    },
+    {
+      "stage": "post",
+      "question": "An object is created on a background thread. Can the main thread use it without copying anything?",
+      "options": [
+        "No, it must be passed through a Handler which copies it",
+        "No, each thread has its own heap",
+        "Yes: threads in one process share the address space, so it is the same object at the same address",
+        "Yes, but only if it is marked as thread-safe"
+      ],
+      "correct": 2,
+      "explanation": "Sharing the address space is exactly what makes this free, and exactly what makes it dangerous: two threads writing the same object need coordinating. Passing between threads is about deciding when it is safe to look, not about moving the data."
+    }
+  ]
+}

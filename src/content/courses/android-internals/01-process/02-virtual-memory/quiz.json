@@ -1,0 +1,78 @@
+{
+  "lesson": "1.2",
+  "title": "Virtual memory: why every process thinks it owns the machine",
+  "questions": [
+    {
+      "stage": "pre",
+      "question": "There is one memory chip in the phone, and every running app is in it. What keeps one app's memory out of another's reach?",
+      "options": [
+        "Each app is given its own region and stays inside it",
+        "Android checks every read against the app's permissions",
+        "Each process has its own table of addresses, with no entry for anyone else's memory",
+        "Apps are encrypted separately in memory"
+      ],
+      "correct": 2,
+      "explanation": "There is no guard watching each access, and nothing would stop a stray pointer from leaving a region. The separation is that another app's memory has no address in your process at all."
+    },
+    {
+      "stage": "check",
+      "question": "Your code reads an object at a virtual address. What happens between that instruction and the memory chip?",
+      "options": [
+        "The kernel intercepts the read and performs it on your behalf",
+        "The MMU translates the address using your process's page table",
+        "The address is used directly, because virtual addresses are physical on mobile devices",
+        "The runtime looks the object up in a table it maintains"
+      ],
+      "correct": 1,
+      "explanation": "The translation is done by hardware on every access, which is the only way it can be fast enough to happen millions of times a second. The kernel's job is writing the table, not performing the reads."
+    },
+    {
+      "stage": "check",
+      "question": "A process list shows your app with a VSZ of 14 GB on a phone that has 8 GB of memory. What is wrong?",
+      "options": [
+        "The process is leaking memory badly",
+        "The tool is reporting kilobytes as gigabytes",
+        "Nothing. VSZ counts address space, which is not memory",
+        "The app has memory swapped out to storage"
+      ],
+      "correct": 2,
+      "explanation": "Addresses are invented, so reserving a lot of them costs nothing. The number worth watching is the resident one, which counts pages actually present in physical memory."
+    },
+    {
+      "stage": "check",
+      "question": "Your app throws OutOfMemoryError while the device still has plenty of free memory. How can both be true?",
+      "options": [
+        "The runtime applies a heap cap per app, and your app crossed it",
+        "The free memory is reserved for the system and unavailable to apps",
+        "The allocation was larger than a single page, which is not allowed",
+        "The garbage collector had not run yet, so the memory was not really free"
+      ],
+      "correct": 0,
+      "explanation": "The cap exists so that one app cannot exhaust the device and take everything else down with it. The device having memory left is the point, not a contradiction."
+    },
+    {
+      "stage": "post",
+      "question": "A teammate proposes passing a raw memory address from your app to another app so it can read your data directly. Why will that never work?",
+      "options": [
+        "The address would need to be sent over Binder, which strips pointers",
+        "The other process has a different page table, so that number means something else there, or nothing",
+        "Android blocks pointer sharing for security reasons",
+        "It would work, but only if both apps are signed by the same key"
+      ],
+      "correct": 1,
+      "explanation": "A virtual address is only meaningful inside the process whose page table defines it. Sharing memory between processes has to be arranged by the kernel, which maps the same physical pages into both address spaces."
+    },
+    {
+      "stage": "post",
+      "question": "Why is a stack trace address from one crash report useless when compared with an address from another device's report?",
+      "options": [
+        "Crash reporters obfuscate addresses before uploading them",
+        "Addresses change when the app is recompiled",
+        "Each process has its own address space, so the same number means nothing across processes",
+        "Addresses are only valid while the process is running"
+      ],
+      "correct": 2,
+      "explanation": "Two processes can hold entirely unrelated data at the same virtual address, so the raw number carries no meaning outside the process that produced it. This is why symbolication maps addresses back to code rather than comparing them."
+    }
+  ]
+}

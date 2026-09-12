@@ -1,0 +1,50 @@
+---
+import { getCollection, render } from 'astro:content';
+import Lesson from '../../../../layouts/Lesson.astro';
+import Callout from '../../../../components/Callout.astro';
+import Check from '../../../../components/Check.astro';
+import Figure from '../../../../components/Figure.astro';
+import CodeTabs from '../../../../components/CodeTabs.astro';
+import Snippet from '../../../../components/Snippet.astro';
+import ApiLevel from '../../../../components/ApiLevel.astro';
+import { courseSlug, lessonParts } from '../../../../lib/courses';
+
+/**
+ * Components are pre-registered here so lesson files stay plain content with
+ * no import block, the same arrangement the posts use.
+ */
+const components = { Callout, Check, Figure, CodeTabs, Snippet, ApiLevel };
+
+export async function getStaticPaths() {
+  const courses = await getCollection('courses');
+  const chapters = await getCollection('chapters');
+  const lessons = await getCollection('lessons');
+
+  return lessons.flatMap((lesson) => {
+    const { course: courseId, chapter, lesson: lessonSeg } = lessonParts(lesson.id);
+    const course = courses.find((item) => item.id === courseId);
+    const chapterEntry = chapters.find((item) => item.id === `${courseId}/${chapter.order.toString().padStart(2, '0')}-${chapter.slug}`);
+    if (!course || !chapterEntry) return [];
+    const group = course.data.group;
+    return [{
+      params: {
+        group,
+        course: courseSlug(courseId, group),
+        chapter: chapter.slug,
+        lesson: lessonSeg.slug,
+      },
+      props: {
+        lesson,
+        chapter: chapterEntry,
+        course,
+        siblings: lessons.filter((item) => lessonParts(item.id).course === courseId),
+      },
+    }];
+  });
+}
+
+const { lesson, chapter, course, siblings } = Astro.props;
+const { Content } = await render(lesson);
+---
+
+<Lesson lesson={lesson} chapter={chapter} course={course} siblings={siblings} Content={Content} components={components} />

@@ -1,0 +1,61 @@
+<svg viewBox="0 0 700 336" role="img" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="dg-arrow-u" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-line)"/>
+    </marker>
+    <marker id="dg-arrow-x" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-warn)"/>
+    </marker>
+  </defs>
+
+  <g data-part="user-band">
+    <rect x="16" y="14" width="668" height="104" rx="10" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <text x="32" y="36" font-family="var(--font-mono)" font-size="12" fill="var(--dg-muted)">user space</text>
+    <text x="668" y="36" text-anchor="end" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">most of the machine is unavailable here</text>
+  </g>
+
+  <g data-part="app">
+    <rect x="40" y="48" width="200" height="56" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="140" y="72" text-anchor="middle" font-family="var(--font-ui)" font-size="13" fill="var(--dg-label)">your app</text>
+    <text x="140" y="92" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-muted)">uid 10412</text>
+  </g>
+
+  <g data-part="syscall">
+    <rect x="286" y="118" width="128" height="42" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="2"/>
+    <text x="350" y="144" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">system call</text>
+    <path d="M180 108 C 240 118 260 126 282 136" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-u)"/>
+    <text x="196" y="132" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">the only door</text>
+  </g>
+
+  <g data-part="kernel-band">
+    <rect x="16" y="164" width="668" height="156" rx="10" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="32" y="186" font-family="var(--font-mono)" font-size="12" fill="var(--dg-muted)">kernel space</text>
+  </g>
+
+  <g data-part="check">
+    <rect x="40" y="200" width="220" height="70" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="150" y="224" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">which uid is asking?</text>
+    <text x="150" y="244" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">who owns the file?</text>
+    <text x="150" y="262" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">compared on every call</text>
+    <path d="M330 162 C 300 176 250 186 240 196" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-u)"/>
+  </g>
+
+  <g data-part="hardware">
+    <rect x="470" y="196" width="200" height="60" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="570" y="220" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">storage, sockets, devices</text>
+    <text x="570" y="240" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">allowed: the kernel does the work</text>
+    <path d="M264 226 H 462" fill="none" stroke="var(--dg-ok)" stroke-width="2" marker-end="url(#dg-arrow-u)"/>
+  </g>
+
+  <g data-part="blocked">
+    <rect x="470" y="266" width="200" height="42" rx="8" fill="var(--dg-fill)" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <text x="570" y="292" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">refused: Permission denied</text>
+    <path d="M264 250 C 340 280 400 288 462 288" fill="none" stroke="var(--dg-warn)" stroke-width="2" marker-end="url(#dg-arrow-x)"/>
+  </g>
+
+  <g data-part="binder">
+    <rect x="300" y="196" width="146" height="60" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="373" y="220" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">Binder</text>
+    <text x="373" y="240" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">a driver, to other processes</text>
+  </g>
+</svg>

@@ -1,0 +1,603 @@
+---
+title: "Architecture & Dependency Injection"
+navTitle: "Architecture & DI"
+summary: "Three client-side forces, unidirectional data flow, the repository as policy, manual DI until it breaks, then Hilt and testing seams."
+readingTime: "4 hours"
+minutes: 220
+tags: ["unidirectional data flow","ui state","viewmodel","repository","single source of truth","domain layer","use case","mvvm","mvi","events vs state","dependency rule","modularisation","application scope","main safety","god viewmodel","dependency injection","constructor injection","object graph","scope","lifetime"]
+draft: true
+date: "2026-07-04"
+subtopic: "android-internals"
+subtopicOrder: 14
+part: "III"
+verifiedAgainst: "compileSdk 36 · Kotlin 2.3 · Lifecycle 2.9"
+stage: "outline"
+labModule: ":ch14-architecture"
+sources: ["11-app-architecture-and-unidirectional-data-flow#The forces on a client app","11-app-architecture-and-unidirectional-data-flow#Layers and the dependency rule","11-app-architecture-and-unidirectional-data-flow#UI state modelling","11-app-architecture-and-unidirectional-data-flow#Unidirectional data flow","11-app-architecture-and-unidirectional-data-flow#Events vs state","11-app-architecture-and-unidirectional-data-flow#The data layer","11-app-architecture-and-unidirectional-data-flow#The domain layer","11-app-architecture-and-unidirectional-data-flow#Concurrency in architecture","11-app-architecture-and-unidirectional-data-flow#Modularisation as an architectural tool","11-app-architecture-and-unidirectional-data-flow#Anti-patterns with names","11-app-architecture-and-unidirectional-data-flow#Failure modes","11-app-architecture-and-unidirectional-data-flow#Cheat-sheet","12-dependency-injection-and-object-graphs#The problem","12-dependency-injection-and-object-graphs#Manual DI first","12-dependency-injection-and-object-graphs#Scopes are lifetimes","12-dependency-injection-and-object-graphs#Dagger / Hilt","12-dependency-injection-and-object-graphs#Compile-time vs runtime graphs","12-dependency-injection-and-object-graphs#DI and Compose","12-dependency-injection-and-object-graphs#DI in a modular app","12-dependency-injection-and-object-graphs#Fakes over mocks","12-dependency-injection-and-object-graphs#Failure modes","12-dependency-injection-and-object-graphs#Cheat-sheet"]
+---
+Most architecture writing argues from taste: layers are cleaner, abstractions are better, this diagram has fewer arrows. That is not an argument you can settle.
+
+This chapter argues from **three forces that are specific to a client app**, and every rule below is justified by one of them or dropped:
+
+1. **The UI can die and come back** — process death (ch. 5) means any in-memory state may vanish and be rebuilt from a `Bundle`.
+2. **Work is concurrent and cancellable** — chapter 12's coroutines, cancelled the moment a screen goes away.
+3. **Data has two sources and the user is faster than the network** — disk and server, and the user expects an answer before the server has one.
+
+Architecture on a client is what makes those three *testable*. Nothing more mystical than that.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## The forces on a client app
+
+A server handler is a function: request in, response out, no state between calls. Almost none of that is true here.
+
+Your process can be killed mid-flow. Your screen is recreated on rotation. Two data sources disagree. The user taps twice before the first tap finishes. A request is cancelled halfway because they navigated away.
+
+Every one of those is a *state* problem, which is why the answer is about where state lives and who may change it — not about how many interfaces you have.
+
+## Layers and the dependency rule
+
+Three layers, and one rule: **dependencies point inward, never outward.**
+
+```
+UI  ──▶  domain (optional)  ──▶  data
+```
+
+| Layer | Owns | May know about Android |
+|---|---|---|
+| UI | what is on screen; user events | yes — Compose, lifecycle, resources |
+| Domain | business rules independent of screens | no |
+| Data | where data comes from and the policy for getting it | yes, at the edges (Room, Retrofit, DataStore) |
+
+The rule earns its place through two concrete prohibitions.
+
+**The data layer never returns a UI-shaped model.** A repository that returns "Posted 3 hours ago" has embedded a formatting decision, a locale and a clock into a layer that cannot see any of them — and now it cannot be tested without a device. It returns an `Instant`; the UI formats.
+
+**The UI never builds a query.** SQL in a composable means the storage layer cannot change without touching the screen, and the screen cannot be tested without a database.
+
+**Where does Android live?** The data layer touches Android at its edges — that is what Room and Retrofit are. What must not happen is `Context` leaking *through* the boundary into the domain, or a `ViewModel` holding a `View` (ch. 5). The practical test: can this class be unit-tested on the JVM with no Robolectric? If not, something crossed a boundary.
+
+## UI state modelling
+
+One immutable object per screen, produced by the `ViewModel`, consumed by the UI.
+
+The modelling choice — sealed states versus a flat state with flags — is a genuine trade-off rather than a rule:
+
+```kotlin
+// Sealed: invalid combinations are unrepresentable (ch. 12).
+sealed interface FeedState {
+    data object Loading : FeedState
+    data class Content(val articles: PersistentList<Article>) : FeedState
+    data class Failed(val error: LoadError) : FeedState
+}
+```
+
+Sealed is right when the states are genuinely exclusive. It becomes awkward the moment you need *partial* states — content plus a refresh in progress plus a non-fatal banner — because each combination needs its own subtype.
+
+```kotlin
+// Flat: expresses overlap, at the cost of allowing nonsense combinations.
+data class FeedState(
+    val articles: PersistentList<Article> = persistentListOf(),
+    val isRefreshing: Boolean = false,
+    val banner: Banner? = null,
+)
+```
+
+The workable compromise for most screens: a sealed type for the *load* outcome, flat fields for things that genuinely coexist.
+
+**Derive rather than store.** If `isEmpty` is `articles.isEmpty()`, do not store it — a stored derived value is a second source of truth that can disagree with the first.
+
+**The test:** can you construct an instance of your state that should be impossible? If yes, tighten it (ch. 12).
+
+## Unidirectional data flow
+
+<Diagram
+  caption="One direction. State flows down and is never written by the UI; events flow up and are never handled by the UI. Every screen in this series has this shape."
+  label="Cycle diagram of unidirectional data flow: the repository produces data, the ViewModel maps it into one immutable UI state that flows down to the UI, and user events flow up to the ViewModel, which calls the repository. The UI never mutates state directly."
+>
+  <svg viewBox="0 0 660 244" width="660" height="244">
+    <rect x="40" y="30" width="160" height="52" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="120" y="52" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">data layer</text>
+    <text x="120" y="68" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">owns the policy</text>
+
+    <rect x="250" y="30" width="160" height="52" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="330" y="52" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">ViewModel</text>
+    <text x="330" y="68" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">maps to ONE state</text>
+
+    <rect x="460" y="30" width="160" height="52" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="540" y="52" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">UI</text>
+    <text x="540" y="68" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">renders, never mutates</text>
+
+    <path d="M200 56h50M410 56h50" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M242 50 L250 56 L242 62M452 50 L460 56 L452 62" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="225" y="46" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-ok)">Flow</text>
+    <text x="435" y="46" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-ok)">state</text>
+
+    <path d="M540 82 L540 140 L330 140" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <path d="M338 134 L330 140 L338 146" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <text x="440" y="132" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">events up: onRefresh(), onItemClick(id)</text>
+
+    <path d="M330 140 L120 140 L120 82" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <path d="M114 90 L120 82 L126 90" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+
+    <text x="330" y="186" text-anchor="middle" font-family="var(--font-ui)" font-size="11.5" fill="var(--dg-muted)">The UI holds no state the ViewModel does not know about. That is what makes</text>
+    <text x="330" y="204" text-anchor="middle" font-family="var(--font-ui)" font-size="11.5" fill="var(--dg-muted)">the screen restorable after process death and testable without a device —</text>
+    <text x="330" y="222" text-anchor="middle" font-family="var(--font-ui)" font-size="11.5" fill="var(--dg-muted)">the two forces this chapter opened with.</text>
+  </svg>
+</Diagram>
+
+State down, events up. The `ViewModel` becomes, in effect, a reducer: current state plus an event produces new state.
+
+**MVVM, MVI, MVP — honestly.** MVP had a Presenter with a View interface, which made testing possible but required an interface per screen. MVVM replaced it with observable state, which is what `StateFlow` gives you. MVI adds a formal Intent type and a single reduce function, which brings a replayable event log and more boilerplate.
+
+The labels matter less than the invariants. **One source of truth for the screen; the UI never mutates it; every change is a function of the previous state and an event.** Satisfy those and the name is a team preference.
+
+## Events vs state
+
+The distinction that produces the most bugs. **State** is true until it changes. An **event** happens once: navigate, show a snackbar, play a sound.
+
+Chapter 12 covered the mechanism; here is the decision. A `StateFlow` re-emits its current value to every new collector, so an event stored in one fires again after every rotation.
+
+Two workable answers:
+
+```kotlin
+// 1. Model it as state with consumption — survives process death, testable.
+data class FeedState(val message: UserMessage? = null)
+fun onMessageShown(id: Long) { _state.update { it.copy(message = null) } }
+
+// 2. A Channel — exactly-once delivery, no replay.
+private val _effects = Channel<Effect>(Channel.BUFFERED)
+val effects = _effects.receiveAsFlow()
+```
+
+Prefer the first for anything the user should still see after a rotation — an error banner is state, not an event. Use the second for genuinely transient effects. A `SharedFlow` with `replay = 0` drops events while nothing collects, which `repeatOnLifecycle` guarantees will happen.
+
+## The data layer
+
+A repository is not a thin wrapper over an API. Its job is **policy**: cache or network, when to refresh, how to merge, what to retry.
+
+```kotlin
+class ArticleRepository(private val api: Api, private val dao: ArticleDao) {
+    // A Flow, not a getter: the UI observes the store and the network writes to it.
+    fun articles(): Flow<List<Article>> = dao.observeAll().map { it.map(ArticleEntity::toDomain) }
+
+    suspend fun refresh() = withContext(Dispatchers.IO) {   // main-safety is the repo's job (ch. 12)
+        dao.upsert(api.fetchArticles().map(ArticleDto::toEntity))
+    }
+}
+```
+
+Two decisions in that small block:
+
+**Expose a `Flow`, not a one-shot getter.** A getter forces every caller to decide when to refresh. A flow makes the local store the single source of truth and the network merely a writer to it — chapter 17's entire argument, in one method signature.
+
+**Main-safety is the repository's guarantee** (ch. 12). A `suspend` function that blocks is a broken contract, and pushing `withContext` to callers means one will forget.
+
+**How many models?** Three is common — `Dto`, `Entity`, domain — and three is sometimes one too many. Keep them separate when they genuinely differ: the DTO has the server's field names and nullability, the entity has indices and foreign keys, the domain model has neither. Collapse them when they are the same shape with different names; the mapping code is not free.
+
+## The domain layer
+
+Optional, and the honest answer is that many apps do not need one.
+
+A use case earns its place when logic is **shared between screens** or **orchestrates several repositories**:
+
+```kotlin
+class ObserveFeedUseCase(private val articles: ArticleRepository, private val settings: SettingsRepository) {
+    operator fun invoke(): Flow<List<Article>> =
+        combine(articles.articles(), settings.hiddenTopics()) { list, hidden ->
+            list.filterNot { it.topic in hidden }
+        }
+}
+```
+
+That is real logic in one place rather than duplicated in three `ViewModel`s.
+
+A use case that calls exactly one repository method and returns it unchanged is **a per-method file tax**. It adds a file, an injection and a level of indirection for no behaviour. Add the layer when the second consumer appears, not in anticipation of it.
+
+## Concurrency in architecture
+
+Where a coroutine's scope lives is an architectural decision, because it decides what happens when the user leaves.
+
+| Scope | Cancelled when | For |
+|---|---|---|
+| `viewModelScope` | the `ViewModel` clears | anything whose result the screen needs |
+| an application scope | never (until the process dies) | a write that must complete even if the user navigates away |
+| `WorkManager` | it does not — it survives process death | work that must survive the app closing (ch. 9) |
+
+The middle one is worth spelling out. "Mark as read" fired from `viewModelScope` is cancelled when the user navigates away — which is exactly when they expect it to have happened.
+
+```kotlin
+class Repo(private val appScope: CoroutineScope) {
+    suspend fun markRead(id: String) {
+        appScope.launch { dao.markRead(id); api.markRead(id) }.join()
+    }
+}
+```
+
+The `launch` in an application-lifetime scope survives the caller; the `join` lets the caller await it if it is still there. And note the ladder: application scope survives navigation but **not process death**. If the write must survive that, it belongs in WorkManager.
+
+## Modularisation as an architectural tool
+
+Modules are for **build time and ownership**, not aesthetics. Splitting a small app into fifteen modules buys configuration overhead and nothing else.
+
+The shape that works:
+
+```
+:app                 wires everything; the only module that sees all features
+:feature:feed        a screen or flow — UI, ViewModel, its own graph (ch. 7)
+:feature:detail
+:core:data           repositories
+:core:database       Room
+:core:network        Retrofit/OkHttp
+:core:designsystem   tokens and components (ch. 19)
+```
+
+**`api` versus `implementation`** is the lever that matters for build times (ch. 20). `implementation` keeps a dependency off your consumers' compile classpath, so changing it does not recompile them. `api` leaks it and every consumer rebuilds. Default to `implementation`; use `api` only when a type genuinely appears in your public signatures.
+
+**Features must not depend on each other.** Feed navigating to Detail goes through an interface the app module implements — otherwise you have a cycle, or a build graph where every feature rebuilds when any changes.
+
+**Avoid the god `core`.** A single `:core` that everything depends on means every change rebuilds everything, which is the opposite of why you modularised.
+
+## Anti-patterns with names
+
+Naming them makes them reviewable.
+
+**The god ViewModel** — one class per screen holding twelve flows, network calls and formatting. The tell is a `ViewModel` you cannot describe in one sentence. Extract use cases or split the screen.
+
+**The singleton cache with mutable state** — `object DataCache { var user: User? = null }`. Empty after process death while the UI is restored (ch. 5), and untestable because tests share it.
+
+**The Activity that is the repository** — network calls in `onCreate`, results in fields. Nothing survives rotation and nothing is testable.
+
+**`EventBus`** — global broadcast between components. Nothing tells you who listens, ordering is undefined, and it is the navigation event bus of chapter 7 generalised to everything.
+
+**`Context` in the data layer** — a repository taking a `Context` to read a string resource is a repository that needs Robolectric to test. Pass the value, or return an id the UI resolves.
+
+**"MVI with 40 intents"** — a sealed `Intent` type with one subtype per button. The ceremony grows with the screen while the benefit does not. Method calls on the `ViewModel` are fine.
+
+## Failure modes: App architecture
+
+**A screen restores blank after being away.** *Symptom:* rare, unreproducible empty states. *Cause:* state in a singleton or a plain field rather than `SavedStateHandle` (ch. 5). *Fix:* the seed in tier 3, everything else derived.
+
+**Two parts of the UI disagree.** *Symptom:* a badge count that does not match the list. *Cause:* two sources of truth. *Fix:* derive one from the other; never store both.
+
+**A snackbar reappears forever after rotation.** *Symptom:* an error that will not go away. *Cause:* a one-shot event in a `StateFlow`. *Fix:* state with consumption, or a `Channel`.
+
+**"Mark as read" only works if you stay on the screen.** *Symptom:* the change is lost when the user navigates away quickly. *Cause:* `viewModelScope` cancelled the write. *Fix:* an application scope, or WorkManager if it must survive process death.
+
+**The `ViewModel` cannot be tested without Robolectric.** *Symptom:* unit tests need an Android runtime. *Cause:* a `Context`, a resource lookup or a framework type crossed the boundary. *Fix:* move it to the UI layer.
+
+**Every build recompiles everything.** *Symptom:* module boundaries bought no build-time win. *Cause:* `api` everywhere, or a god `core`. *Fix:* `implementation` by default; split `core` by concern.
+
+## Cheat-sheet: App architecture
+
+```kotlin
+// one state object, derived not stored
+data class FeedState(val articles: PersistentList<Article>, val isRefreshing: Boolean) {
+    val isEmpty get() = articles.isEmpty() && !isRefreshing     // derived
+}
+
+// repository owns policy AND main-safety
+fun articles(): Flow<List<Article>> = dao.observeAll().map { ... }
+suspend fun refresh() = withContext(Dispatchers.IO) { ... }
+
+// a write that must outlive the screen
+appScope.launch { repo.markRead(id) }
+```
+
+| Decision | Default |
+|---|---|
+| screen state | one immutable object in a `ViewModel` |
+| exclusive states | sealed; flat fields for things that coexist |
+| one-shot effect | state with consumption; `Channel` if truly transient |
+| repository return | a `Flow` from the local store |
+| dependency | `implementation` |
+| domain layer | add it at the second consumer, not before |
+
+<LabCard module=":ch11-architecture">
+Refactor one screen from imperative callback code to unidirectional data flow, then prove the win rather than asserting it. Two tests: the screen restores correctly after `adb shell am kill`, and the `ViewModel` is unit-tested on the JVM with no Robolectric and no Android dependency. If the second test needs a `Context`, something is still on the wrong side of a boundary — find it.
+</LabCard>
+
+## The problem
+
+```kotlin
+class FeedViewModel : ViewModel() {
+    private val repo = ArticleRepository(
+        api = Retrofit.Builder().baseUrl(BASE).build().create(Api::class.java),
+        dao = Room.databaseBuilder(context, Db::class.java, "db").build().articleDao(),
+    )
+}
+```
+
+Three failures, and they compound.
+
+**Construction is coupled to use.** The `ViewModel` knows how to build a Retrofit instance. Change the HTTP client and this file changes.
+
+**There is no seam for a test.** You cannot substitute a fake API without changing production code, so testing this `ViewModel` means a real network stack.
+
+**Lifetimes leak.** That `Room.databaseBuilder` runs per `ViewModel`, so each screen opens its own database connection — expensive, and they will disagree.
+
+The fix is to stop calling constructors:
+
+```kotlin
+class FeedViewModel(private val repo: ArticleRepository) : ViewModel()
+```
+
+Now the class states what it needs and someone else decides where it comes from. Everything below is about who that someone is.
+
+## Manual DI first
+
+The "someone else" can be a plain class you write.
+
+```kotlin
+class AppContainer(context: Context) {
+    private val client = OkHttpClient.Builder().build()
+    private val api: Api = Retrofit.Builder().baseUrl(BASE).client(client)
+        .build().create(Api::class.java)
+    private val db = Room.databaseBuilder(context, Db::class.java, "app.db").build()
+
+    // Singletons: one instance for the whole app.
+    val articleRepository = ArticleRepository(api, db.articleDao())
+    val settingsRepository = SettingsRepository(context.dataStore)
+}
+
+class App : Application() {
+    lateinit var container: AppContainer
+    override fun onCreate() { super.onCreate(); container = AppContainer(this) }
+}
+```
+
+This is real dependency injection. Lifetimes are explicit — a `val` in the container is an application singleton — and a test constructs an `AppContainer` with fakes.
+
+**Where it breaks down** is worth naming precisely, because it is the argument for a framework:
+
+- **Ordering.** The container must construct in dependency order, by hand. Add something in the middle and you reorder.
+- **More than one lifetime.** Application singletons are fine as `val`s. Something scoped to a screen needs a second container, created and destroyed at the right moment, holding a reference to the first.
+- **Modules cannot see each other.** In a modular app (ch. 14), `:feature:feed` cannot reference `AppContainer` without depending on `:app`, which inverts the dependency.
+- **Every new dependency edits the container.** Constructor churn concentrates in one file that everyone touches.
+
+At two or three lifetimes and a handful of modules, the container becomes the bottleneck. That is the moment — not before — when a framework pays.
+
+## Scopes are lifetimes
+
+The idea a framework mostly exists to enforce. A **scope** says how long one instance lives and who shares it.
+
+| Scope | Lives as long as | Typical |
+|---|---|---|
+| Application | the process | database, HTTP client, repositories |
+| Activity / Fragment | that screen instance | things needing a UI `Context` |
+| ViewModel | across configuration changes (ch. 5) | screen-level coordinators |
+| Navigation graph | a flow (ch. 7) | checkout state shared by three screens |
+| Unscoped | a new one per injection | stateless mappers, tiny helpers |
+
+**The leak follows mechanically from mismatching them.** Inject something short-lived into something long-lived and the short-lived thing cannot be collected:
+
+```kotlin
+@Singleton
+class AnalyticsTracker @Inject constructor(
+    private val activity: Activity,   // WRONG: an app-lifetime object holding one Activity
+)
+```
+
+That Activity is now immortal, and every rotation adds another (ch. 5). The rule: **a longer-lived object may never hold a shorter-lived one.** If it needs one, it takes a provider or a factory, or the relationship is inverted.
+
+<Diagram
+  caption="Lifetimes nest. A reference may point outward, from short-lived to long-lived; a reference pointing inward pins the shorter lifetime open, which is what a leak is."
+  label="Nested scope diagram: the application scope contains the database and HTTP client, the activity scope sits inside it, and the ViewModel scope inside that. References from inner to outer are safe; a reference from the application singleton to an Activity is a leak."
+>
+  <svg viewBox="0 0 660 260" width="660" height="260">
+    <rect x="12" y="22" width="392" height="216" rx="10" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="26" y="42" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">APPLICATION — lives as long as the process</text>
+    <rect x="26" y="52" width="170" height="24" rx="5" fill="var(--dg-fill-2)" stroke="var(--dg-line)"/>
+    <text x="111" y="68" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">database, http client</text>
+
+    <rect x="26" y="90" width="364" height="134" rx="10" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="40" y="110" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">ACTIVITY — dies on rotation</text>
+
+    <rect x="40" y="122" width="336" height="88" rx="10" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="54" y="142" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">VIEWMODEL — survives rotation, dies with the screen</text>
+    <rect x="54" y="152" width="150" height="24" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="129" y="168" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">screen state</text>
+    <path d="M204 164 L300 164 L300 64 L196 64" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M204 58 L196 64 L204 70" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="312" y="120" font-family="var(--font-ui)" font-size="10" fill="var(--dg-ok)">safe:</text>
+    <text x="312" y="134" font-family="var(--font-ui)" font-size="10" fill="var(--dg-ok)">short holds long</text>
+
+    <rect x="426" y="70" width="222" height="98" rx="10" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="537" y="94" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">THE LEAK</text>
+    <text x="537" y="114" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">a singleton holding an Activity</text>
+    <text x="537" y="130" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">pins it open forever, and every</text>
+    <text x="537" y="146" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">rotation adds another</text>
+    <path d="M426 108 L404 108" fill="none" stroke="var(--dg-warn)" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+    <text x="330" y="254" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">Choose the shortest scope that satisfies every consumer.</text>
+  </svg>
+</Diagram>
+
+`@ApplicationContext` exists precisely because the safe `Context` for a singleton is the process-scoped one.
+
+## Dagger / Hilt
+
+Dagger generates the container you would have written; Hilt is Dagger with Android's lifetimes predefined.
+
+```kotlin
+@Module @InstallIn(SingletonComponent::class)
+object DataModule {
+    @Provides @Singleton
+    fun provideDb(@ApplicationContext ctx: Context): Db =
+        Room.databaseBuilder(ctx, Db::class.java, "app.db").build()
+
+    @Provides fun provideDao(db: Db): ArticleDao = db.articleDao()
+}
+
+@Module @InstallIn(SingletonComponent::class)
+abstract class RepoModule {
+    @Binds abstract fun bindRepo(impl: ArticleRepositoryImpl): ArticleRepository
+}
+```
+
+**`@Provides` versus `@Binds`:** use `@Provides` when you must *construct* something (a builder, a third-party type), and `@Binds` when you are only saying "this interface is satisfied by this class". `@Binds` is abstract and generates no code beyond the mapping, so prefer it for interface bindings.
+
+The Android pieces:
+
+```kotlin
+@HiltAndroidApp class App : Application()
+@AndroidEntryPoint class MainActivity : ComponentActivity()
+
+@HiltViewModel
+class FeedViewModel @Inject constructor(
+    private val repo: ArticleRepository,
+    private val saved: SavedStateHandle,      // provided automatically (ch. 5)
+) : ViewModel()
+```
+
+**Qualifiers** disambiguate two bindings of one type:
+
+```kotlin
+@Qualifier annotation class AuthenticatedClient
+@Provides @AuthenticatedClient fun authClient(...): OkHttpClient
+```
+
+**Multibindings** let modules contribute into one collection without the collector knowing them — the clean way for feature modules to register initialisers or nav graphs.
+
+**Assisted injection** covers a dependency known only at runtime:
+
+```kotlin
+@HiltViewModel(assistedFactory = DetailViewModel.Factory::class)
+class DetailViewModel @AssistedInject constructor(
+    @Assisted private val articleId: String,
+    private val repo: ArticleRepository,
+) : ViewModel()
+```
+
+Though for a `ViewModel`, a navigation argument through `SavedStateHandle` (ch. 7) is usually simpler and survives process death for free.
+
+**`EntryPoint`** reaches the graph from a class Hilt does not construct — a `ContentProvider`, a system-instantiated receiver (ch. 6).
+
+**Testing** is where the investment returns:
+
+```kotlin
+@UninstallModules(DataModule::class)
+@HiltAndroidTest
+class FeedTest {
+    @BindValue val repo: ArticleRepository = FakeArticleRepository()
+}
+```
+
+`@TestInstallIn` replaces a module for a whole test source set; `@BindValue` swaps one binding for one test. Neither touches production code, which was the second failure at the top of this chapter.
+
+## Compile-time vs runtime graphs
+
+The real decision, fairly stated.
+
+| | Hilt / Dagger | Koin |
+|---|---|---|
+| Graph built | at compile time | at runtime |
+| A missing binding | **build error**, with the path | runtime exception, at first resolution |
+| Build cost | KSP over the whole graph; noticeable | negligible |
+| Startup cost | negligible — code is generated | small; the graph is assembled |
+| Learning curve | steep; component and scope model | shallow; a DSL |
+| Refactoring | the compiler finds every break | tests must find it |
+
+**Recommendation: Hilt for an app of any size, and the reason is the second row.** A missing or ambiguous binding is a build failure with a diagnostic naming the path, rather than a crash on a screen someone reaches in production. On Android, where a `ViewModel` may only be constructed after a specific navigation, "runtime" can mean "in front of a user".
+
+Koin is a reasonable choice for a small app, a prototype, or a multiplatform module where Dagger's tooling is awkward. Newer compile-time graphs (Metro and similar) trade some of Dagger's ceremony for a lighter model; the compile-time property is the one worth keeping.
+
+## DI and Compose
+
+**Do not inject into composables.** A composable is a function that may run many times a second (ch. 13); pulling a dependency inside one makes it untestable, unpreviewable, and dependent on a `LocalContext` cast.
+
+The injection point is the `ViewModel`:
+
+```kotlin
+@Composable
+fun FeedRoute(viewModel: FeedViewModel = hiltViewModel()) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    FeedScreen(state, viewModel::onRefresh)    // stateless, previewable, no DI (ch. 13)
+}
+```
+
+`hiltViewModel()` resolves from the nearest `ViewModelStoreOwner`, which for a Navigation destination is that back stack entry (ch. 7) — so graph scoping comes free.
+
+**`CompositionLocal` is not DI** (ch. 13). It is right for ambient values — theme, density, insets — and wrong for a dependency a specific screen needs, because it makes that dependency invisible in the signature and a runtime crash when unprovided.
+
+## DI in a modular app
+
+The pattern that keeps feature modules independent (ch. 14):
+
+- `:core:data` declares the **interface** `ArticleRepository` and the module that binds it to an implementation.
+- `:feature:feed` depends on `:core:data` and injects the interface. It never sees the implementation.
+- `:app` includes everything and is the only module that knows the whole graph.
+
+Feature modules therefore do not depend on each other, and swapping an implementation touches one module.
+
+**The build-time cost is real.** Hilt's processor runs over the aggregated graph, and in a large app it is one of the slower tasks (ch. 20). Two mitigations: KSP rather than kapt (ch. 12), and keeping the number of `@InstallIn(SingletonComponent::class)` modules from growing without bound, since every one participates in aggregation.
+
+## Fakes over mocks
+
+The default test double should be a **hand-written fake**: a real implementation of the interface, with an in-memory backing.
+
+```kotlin
+class FakeArticleRepository : ArticleRepository {
+    private val items = MutableStateFlow(emptyList<Article>())
+    override fun articles(): Flow<List<Article>> = items
+    override suspend fun refresh() { items.value = listOf(article("1")) }
+    fun emit(list: List<Article>) { items.value = list }        // test control
+}
+```
+
+Why this beats a mocking framework in most cases:
+
+**A mock asserts on your implementation, not your behaviour.** `verify(repo).refresh()` fails when you rename a method or call it twice for a good reason — a test that breaks on refactors that changed nothing observable.
+
+**Mock setup grows without bound.** Every new call needs another `whenever(...)`, and an unstubbed call returns null and fails somewhere unrelated.
+
+**A fake is written once and reused everywhere,** and it can encode real invariants — a fake that refuses a duplicate id will catch a bug a mock never would.
+
+Mocks remain right for **verifying an interaction that is the actual requirement** — "we send exactly one analytics event" — and for a large third-party interface you only need one method of. Chapter 18 goes further.
+
+## Failure modes: Dependency injection
+
+**An Activity leaks and memory grows with every rotation.** *Symptom:* LeakCanary names an Activity held by a singleton. *Cause:* a longer-lived object holding a shorter-lived one. *Fix:* `@ApplicationContext`, or a provider instead of the instance.
+
+**A crash on a screen nobody reaches in testing.** *Symptom:* `NoBeanDefFoundException` or similar, in production. *Cause:* a runtime graph with a binding that was never resolved during testing. *Fix:* a compile-time graph, or an integration test that resolves every entry point.
+
+**Two screens disagree about the same data.** *Symptom:* a list updates and a badge does not. *Cause:* an unscoped repository, so each injection got a new instance with its own cache. *Fix:* `@Singleton`.
+
+**Tests need a real network or database.** *Symptom:* unit tests are slow and flaky. *Cause:* no seam — dependencies constructed inside the class. *Fix:* constructor injection, then a fake.
+
+**Build times jumped after adding DI.** *Symptom:* a long annotation-processing task. *Cause:* kapt, or an over-aggregated graph. *Fix:* KSP; keep singleton modules bounded (ch. 20).
+
+**A test breaks on a refactor that changed no behaviour.** *Symptom:* `verify` failures after renaming a method. *Cause:* mocks asserting implementation. *Fix:* a fake and an assertion on the outcome.
+
+## Cheat-sheet: Dependency injection
+
+```kotlin
+@Module @InstallIn(SingletonComponent::class)
+abstract class RepoModule {
+    @Binds abstract fun repo(impl: ArticleRepositoryImpl): ArticleRepository   // interface → impl
+}
+
+@HiltViewModel
+class FeedViewModel @Inject constructor(
+    private val repo: ArticleRepository,
+    private val saved: SavedStateHandle,
+) : ViewModel()
+
+// swap one binding for one test, without touching production code
+@BindValue val repo: ArticleRepository = FakeArticleRepository()
+```
+
+| Question | Answer |
+|---|---|
+| where does construction happen | never inside the class that uses it |
+| which scope | the shortest that satisfies every consumer |
+| singleton holding a `Context` | `@ApplicationContext`, never an Activity |
+| interface binding | `@Binds`; `@Provides` only to construct |
+| inject into a composable | no — inject the `ViewModel` |
+| default test double | a hand-written fake |
+
+<LabCard module=":ch12-di">
+Swap a real network client for a fake at three levels — a JVM unit test, a Robolectric test, and an instrumented test — **without changing a line of production code**. If any level requires an edit outside the test source set, the seam is in the wrong place; find it and move it. Then delete one binding and confirm the failure is a build error with a readable path, not a runtime crash.
+</LabCard>

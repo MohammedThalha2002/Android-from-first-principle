@@ -1,0 +1,298 @@
+---
+/**
+ * One lesson.
+ *
+ * The prose is the MDX file. Two things it references live beside it as
+ * files: `quiz.json` and `figures/hero.*`. Both are inlined here, at build
+ * time, and a small script moves them into the slots <Check> and <Figure>
+ * left in the prose. They are rendered in the document either way, so a
+ * reader with no JavaScript gets the whole lesson, the whole figure and all
+ * six questions; they are simply gathered at the end rather than placed.
+ */
+import type { CollectionEntry } from 'astro:content';
+import Base from './Base.astro';
+import Chip from '../components/Chip.astro';
+import { getGroup } from '../data/groups';
+import { chapterHref, courseHref, lessonHref, lessonParts, byOrder } from '../lib/courses';
+import '../styles/lesson.css';
+
+interface QuizQuestion {
+  stage: 'pre' | 'check' | 'post';
+  question: string;
+  options: string[];
+  correct: number;
+  explanation: string;
+}
+interface Step { show: string[]; note: string; }
+
+interface Props {
+  lesson: CollectionEntry<'lessons'>;
+  chapter: CollectionEntry<'chapters'>;
+  course: CollectionEntry<'courses'>;
+  siblings: CollectionEntry<'lessons'>[];
+  Content: any;
+  components?: Record<string, unknown>;
+}
+
+const { lesson, chapter, course, siblings, Content, components = {} } = Astro.props;
+const groupId = course.data.group;
+const group = getGroup(groupId);
+
+const quizzes = import.meta.glob<{ questions: QuizQuestion[] }>('/src/content/courses/**/quiz.json', { eager: true });
+const svgs = import.meta.glob<string>('/src/content/courses/**/figures/*.svg', { eager: true, query: '?raw', import: 'default' });
+const stepFiles = import.meta.glob<{ title: string; desc: string; steps: Step[] }>('/src/content/courses/**/figures/*.steps.json', { eager: true });
+
+const dir = `/src/content/courses/${lesson.id}`;
+const quiz = quizzes[`${dir}/quiz.json`]?.questions ?? [];
+const pre = quiz.filter((q) => q.stage === 'pre');
+const checks = quiz.filter((q) => q.stage === 'check');
+const posts = quiz.filter((q) => q.stage === 'post');
+
+const svg = svgs[`${dir}/figures/hero.svg`];
+const figure = stepFiles[`${dir}/figures/hero.steps.json`];
+
+// Lessons in this chapter for the rail; the whole course for prev/next.
+const chapterLessons = siblings
+  .filter((item) => item.data.chapter === lesson.data.chapter)
+  .sort(byOrder);
+const ordered = siblings.slice().sort(byOrder);
+const index = ordered.findIndex((item) => item.id === lesson.id);
+const previous = index > 0 ? ordered[index - 1] : null;
+const next = index >= 0 && index < ordered.length - 1 ? ordered[index + 1] : null;
+
+const number = `${lesson.data.chapter}.${lesson.data.lesson}`;
+const prereqs = lesson.data.prerequisites
+  .map((id) => ordered.find((item) => `${item.data.chapter}.${item.data.lesson}` === id))
+  .filter(Boolean) as CollectionEntry<'lessons'>[];
+const { chapter: chapterSeg } = lessonParts(lesson.id);
+---
+
+<Base title={lesson.data.title} description={lesson.data.motto} group={groupId} nav="group">
+  <div class="page">
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/">Home</a><span aria-hidden="true">/</span>
+      <a href={`/${groupId}/`}>{group.title}</a><span aria-hidden="true">/</span>
+      <a href={courseHref(course.id, groupId)}>{course.data.navTitle ?? course.data.title}</a><span aria-hidden="true">/</span>
+      <span aria-current="page">{number}</span>
+    </nav>
+
+    <div class="lesson-grid">
+      <aside class="chapter-rail">
+        <div class="rail-inner">
+          <p class="rail-chapter">
+            <span>Chapter {lesson.data.chapter}</span>
+            <a href={chapterHref(`${course.id}/${chapterSeg.order.toString().padStart(2, '0')}-${chapterSeg.slug}`, groupId)}>
+              {chapter.data.title}
+            </a>
+          </p>
+          <ol class="rail-spine">
+            {chapterLessons.map((item) => (
+              <li class={item.id === lesson.id ? 'here' : undefined}>
+                <a href={lessonHref(item.id, groupId)} aria-current={item.id === lesson.id ? 'page' : undefined}>
+                  <span class="rail-marker"><i></i></span>
+                  <span class="rail-n">{item.data.chapter}.{item.data.lesson}</span>
+                  <span class="rail-label">{item.data.title}</span>
+                </a>
+              </li>
+            ))}
+          </ol>
+          <p class="rail-progress">
+            Lesson {chapterLessons.findIndex((item) => item.id === lesson.id) + 1} of {chapterLessons.length}
+          </p>
+        </div>
+      </aside>
+
+      <article class="lesson-main">
+        <div class="sheet">
+        <header class="lesson-head">
+          <h1 class="lesson-title">{lesson.data.title}</h1>
+          <p class="lesson-motto">{lesson.data.motto}</p>
+          <div class="lesson-facts">
+            <span class="fact"><b>{lesson.data.minutes}</b> min</span>
+            <span class="fact">{lesson.data.type}</span>
+            {prereqs.length === 0
+              ? <span class="fact">starts here</span>
+              : prereqs.map((item) => (
+                  <a class="fact fact-link" href={lessonHref(item.id, groupId)}>
+                    needs {item.data.chapter}.{item.data.lesson}
+                  </a>
+                ))}
+            {lesson.data.stage === 'outline' && <Chip tint="amber">Outline</Chip>}
+          </div>
+        </header>
+
+        {pre.map((q) => (
+          <section class="q" data-stage="pre" data-correct={q.correct}>
+            <p class="q-label">Before you read</p>
+            <p class="q-text">{q.question}</p>
+            <ol class="q-opts">
+              {q.options.map((option, i) => (
+                <li><button class="q-opt" type="button" data-i={i}>{option}</button></li>
+              ))}
+            </ol>
+            <p class="q-exp" hidden>{q.explanation}</p>
+          </section>
+        ))}
+
+        <div class="prose"><Content components={components} /></div>
+
+        <div class="prose lesson-extras" data-extras>
+          <h2 data-extras-heading>From this lesson</h2>
+
+            {svg && figure && (
+              <figure class="fig" data-figure-source="hero">
+                <div class="fig-stage" set:html={svg} />
+                <p class="fig-note" role="status" aria-live="polite">{figure.steps[0]?.note}</p>
+                <div class="fig-ctl">
+                  <button class="fig-btn" type="button" data-act="prev">Previous</button>
+                  <span class="fig-dots">
+                    {figure.steps.map((_, i) => (
+                      <button class="fig-dot" type="button" data-i={i} aria-label={`Step ${i + 1}`}></button>
+                    ))}
+                  </span>
+                  <button class="fig-btn" type="button" data-act="next">Next</button>
+                  <span class="fig-count">1 of {figure.steps.length}</span>
+                </div>
+                <figcaption>{figure.desc}</figcaption>
+                <details class="fig-all">
+                  <summary>Every step as text</summary>
+                  <ol>{figure.steps.map((step) => <li>{step.note}</li>)}</ol>
+                </details>
+              </figure>
+            )}
+
+            {checks.map((q, n) => (
+              <section class="q" data-stage="check" data-n={n + 1} data-correct={q.correct}>
+                <p class="q-label">Check yourself</p>
+                <p class="q-text">{q.question}</p>
+                <ol class="q-opts">
+                  {q.options.map((option, i) => (
+                    <li><button class="q-opt" type="button" data-i={i}>{option}</button></li>
+                  ))}
+                </ol>
+                <p class="q-exp" hidden>{q.explanation}</p>
+              </section>
+            ))}
+        </div>
+
+        {posts.length > 0 && (
+          <div class="prose lesson-after">
+              <h2>After the lesson</h2>
+              <p>Two situations the lesson did not show. If the mechanism is yours, it predicts both.</p>
+              {posts.map((q) => (
+                <section class="q" data-stage="post" data-correct={q.correct}>
+                  <p class="q-label">Transfer question</p>
+                  <p class="q-text">{q.question}</p>
+                  <ol class="q-opts">
+                    {q.options.map((option, i) => (
+                      <li><button class="q-opt" type="button" data-i={i}>{option}</button></li>
+                    ))}
+                  </ol>
+                  <p class="q-exp" hidden>{q.explanation}</p>
+                </section>
+              ))}
+          </div>
+        )}
+
+        </div>
+
+        <footer class="lesson-footer">
+          {previous
+            ? <a class="btn btn-ghost" href={lessonHref(previous.id, groupId)}><span class="dir">Previous</span>{previous.data.title}</a>
+            : <a class="btn btn-ghost" href={courseHref(course.id, groupId)}><span class="dir">Back to</span>Course home</a>}
+          {next
+            ? <a class="btn" href={lessonHref(next.id, groupId)}><span class="dir">Next</span>{next.data.title}</a>
+            : <a class="btn" href={chapterHref(`${course.id}/${chapterSeg.order.toString().padStart(2, '0')}-${chapterSeg.slug}`, groupId)}><span class="dir">Next</span>Chapter round</a>}
+        </footer>
+      </article>
+    </div>
+  </div>
+
+  {figure && (
+    <script type="application/json" data-figure-steps set:html={JSON.stringify(figure.steps)} />
+  )}
+</Base>
+
+<script>
+  // Place what the layout gathered, then wire it up.
+  const source = document.querySelector('[data-figure-source]');
+  const slot = document.querySelector('.figure-slot');
+  if (source && slot) slot.replaceWith(source);
+
+  document.querySelectorAll('.check-slot').forEach((target) => {
+    const n = target.getAttribute('data-check');
+    const question = document.querySelector(`.q[data-stage="check"][data-n="${n}"]`);
+    if (question) target.replaceWith(question);
+  });
+
+  const extras = document.querySelector('[data-extras]');
+  if (extras && !extras.querySelector('.q, .fig')) extras.remove();
+  else document.querySelector('[data-extras-heading]')?.remove();
+
+  // The stepped figure.
+  const fig = document.querySelector('.fig');
+  const stepsTag = document.querySelector('[data-figure-steps]');
+  if (fig && stepsTag) {
+    const steps = JSON.parse(stepsTag.textContent || '[]') as { show: string[]; note: string }[];
+    const parts = new Map<string, Element>();
+    fig.querySelectorAll('g[data-part]').forEach((g) => parts.set(g.getAttribute('data-part')!, g));
+    const note = fig.querySelector('.fig-note')!;
+    const count = fig.querySelector('.fig-count')!;
+    const dots = Array.from(fig.querySelectorAll<HTMLButtonElement>('.fig-dot'));
+    const prev = fig.querySelector<HTMLButtonElement>('[data-act="prev"]')!;
+    const next = fig.querySelector<HTMLButtonElement>('[data-act="next"]')!;
+    let i = 0;
+    let timer: number | null = null;
+    let touched = false;
+
+    const render = () => {
+      const show = steps[i].show;
+      parts.forEach((g, key) => g.classList.toggle('on', show.includes(key)));
+      note.textContent = steps[i].note;
+      count.textContent = `${i + 1} of ${steps.length}`;
+      dots.forEach((d, n) => d.classList.toggle('on', n === i));
+      prev.disabled = i === 0;
+      next.disabled = i === steps.length - 1;
+    };
+    const stop = () => {
+      touched = true;
+      if (timer) { clearInterval(timer); timer = null; }
+    };
+    prev.addEventListener('click', () => { stop(); if (i > 0) { i--; render(); } });
+    next.addEventListener('click', () => { stop(); if (i < steps.length - 1) { i++; render(); } });
+    dots.forEach((d, n) => d.addEventListener('click', () => { stop(); i = n; render(); }));
+    render();
+
+    const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!still && 'IntersectionObserver' in window) {
+      const observer = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting || touched || timer) continue;
+          timer = window.setInterval(() => {
+            if (i < steps.length - 1) { i++; render(); }
+            else if (timer) { clearInterval(timer); timer = null; }
+          }, 3600);
+        }
+      }, { threshold: 0.4 });
+      observer.observe(fig);
+    }
+  }
+
+  // The questions: one answer each, then the explanation stays visible.
+  document.querySelectorAll<HTMLElement>('.q').forEach((box) => {
+    const correct = Number(box.dataset.correct);
+    const explanation = box.querySelector<HTMLElement>('.q-exp')!;
+    box.querySelectorAll<HTMLButtonElement>('.q-opt').forEach((button) => {
+      button.addEventListener('click', () => {
+        if (box.dataset.answered) return;
+        box.dataset.answered = 'yes';
+        const picked = Number(button.dataset.i);
+        button.dataset.state = picked === correct ? 'right' : 'wrong';
+        if (picked !== correct) {
+          box.querySelectorAll<HTMLButtonElement>('.q-opt')[correct].dataset.state = 'right';
+        }
+        explanation.hidden = false;
+      });
+    });
+  });
+</script>

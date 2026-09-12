@@ -1,0 +1,78 @@
+{
+  "lesson": "1.5",
+  "title": "How a process is told to stop",
+  "questions": [
+    {
+      "stage": "pre",
+      "question": "You save a draft in onDestroy. It works every time in testing. Users still lose drafts. What is going wrong?",
+      "options": [
+        "onDestroy runs on a background thread and the write is cut short",
+        "onDestroy is not called when the system reclaims the process",
+        "The draft is saved, then overwritten when the app restarts",
+        "onDestroy only runs for the last Activity in the task"
+      ],
+      "correct": 1,
+      "explanation": "Testing ends the screen with Back or a rotation, and in both cases the process is alive to run the callback. The case you are trying to protect against removes the process, and there is nothing left to call anything."
+    },
+    {
+      "stage": "check",
+      "question": "Which statement about SIGKILL is true?",
+      "options": [
+        "A process can catch it and clean up quickly before it ends",
+        "It cannot be caught, so no code in the process runs after it arrives",
+        "It asks the runtime to write out a thread dump",
+        "It is only used when an app has already crashed"
+      ],
+      "correct": 1,
+      "explanation": "The kernel does not allow a handler to be registered for it, so the process stops between two instructions. A signal a process could refuse would be useless for reclaiming memory, which is why this one is not negotiable."
+    },
+    {
+      "stage": "check",
+      "question": "The user switches to another app, and twenty minutes later the system reclaims your process. Which of your callbacks ran?",
+      "options": [
+        "onPause and onStop ran when the user left; onDestroy did not run",
+        "All three of onPause, onStop and onDestroy ran",
+        "Only onDestroy ran",
+        "None of them ran"
+      ],
+      "correct": 0,
+      "explanation": "The callbacks you got happened twenty minutes earlier, when the user switched away, and that was the moment to have saved. By the time the process is reclaimed there is no code running to call anything else."
+    },
+    {
+      "stage": "check",
+      "question": "Users report losing data, and your crash reporter shows nothing at all. Why?",
+      "options": [
+        "The reporter cannot upload while the app is in the background",
+        "Nothing crashed. The process was ended, which is not an exception",
+        "The exception was swallowed inside a coroutine",
+        "The reporter only samples a fraction of sessions"
+      ],
+      "correct": 1,
+      "explanation": "Process death produces no exception, so crash reporting has nothing to record and your crash-free rate stays perfect. To see it at all you have to read the system's record of why recent processes of your app ended."
+    },
+    {
+      "stage": "post",
+      "question": "An ANR report contains what every thread in your app was doing. How was it produced?",
+      "options": [
+        "The system reconstructs it from the last frames the app rendered",
+        "The runtime caught SIGQUIT, wrote the dump, and the process carried on",
+        "The app's crash handler wrote it just before the process died",
+        "The kernel dumps a process's memory whenever it kills it"
+      ],
+      "correct": 1,
+      "explanation": "SIGQUIT can be caught, and the Android runtime catches it by writing the state of every thread and then continuing. That is why an ANR report is a snapshot of a living process and contains no exception."
+    },
+    {
+      "stage": "post",
+      "question": "A user force stops your app from Settings. What happens to work you scheduled with WorkManager?",
+      "options": [
+        "It continues, because scheduled work runs in the system process",
+        "It is cancelled permanently and has to be enqueued again from scratch",
+        "It does not run until the user launches the app again themselves",
+        "It runs, but only while the device is charging"
+      ],
+      "correct": 2,
+      "explanation": "A force stop puts the app into a stopped state, and nothing scheduled by it fires while it is in that state. This is worth knowing because it looks exactly like a bug in your scheduling code and is not one."
+    }
+  ]
+}

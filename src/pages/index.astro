@@ -1,0 +1,242 @@
+---
+/**
+ * Home.
+ *
+ * One statement, one course, and what is coming. The course block is the only
+ * raised object on the page: everything else is type and rules, so the thing a
+ * reader should press is never competing with a card that just holds a
+ * sentence.
+ *
+ * The chapter spine inside it is the course's real table of contents rather
+ * than a graphic. Filled markers are written, hollow ones are not, so the page
+ * says where the course currently ends without a progress bar claiming
+ * anything.
+ */
+import { getCollection } from 'astro:content';
+import Base from '../layouts/Base.astro';
+import { subtopics } from '../data/subtopics';
+import { byOrder, chapterHref, chapterParts, courseHref, lessonHref } from '../lib/courses';
+
+const allCourses = await getCollection('courses');
+const allChapters = await getCollection('chapters');
+const allLessons = await getCollection('lessons');
+
+const courses = allCourses.map((course) => {
+  const lessons = allLessons.filter((l) => l.id.startsWith(`${course.id}/`)).sort(byOrder);
+  const chapters = allChapters
+    .filter((c) => c.id.startsWith(`${course.id}/`))
+    .map((chapter) => {
+      const order = chapterParts(chapter.id).chapter.order;
+      return { chapter, order, count: lessons.filter((l) => l.data.chapter === order).length };
+    })
+    .sort((a, b) => a.order - b.order);
+  return { course, lessons, chapters, first: lessons[0] };
+});
+
+const planned = subtopics.filter((s) => s.status === 'coming-soon');
+---
+
+<Base title="First Principles" nav="home">
+  <div class="page home">
+    <header class="statement">
+      <h1>Understand the platform you build on.</h1>
+      <p class="lede">
+        Courses for engineers who can already build a screen. Start with what
+        Android is doing underneath your code, then how to design classes and
+        systems that live on top of it. More of mobile engineering as it gets
+        written.
+      </p>
+      <p class="terms">One idea per lesson, fifteen to thirty minutes. Nothing here needs a device plugged in.</p>
+    </header>
+
+    {courses.map(({ course, lessons, chapters, first }) => (
+      <article class="course">
+        <div class="course-head">
+          <div>
+            <h2><a href={courseHref(course.id, course.data.group)}>{course.data.title}</a></h2>
+            <p class="course-line">{course.data.tagline}</p>
+          </div>
+          <p class="count">
+            <b>{lessons.length}</b> of {course.data.planned?.lessons ?? lessons.length}
+            <span>lessons written</span>
+          </p>
+        </div>
+
+        <ol class="spine">
+          {chapters.map(({ chapter, order, count }) => (
+            <li class={count > 0 ? 'written' : undefined}>
+              <span class="marker"><i></i>{order}</span>
+              {count > 0 ? (
+                <a href={chapterHref(chapter.id, course.data.group)}>{chapter.data.title}</a>
+              ) : (
+                <span class="pending">{chapter.data.title}</span>
+              )}
+              <span class="tally">{count > 0 ? `${count} lessons` : 'planned'}</span>
+            </li>
+          ))}
+        </ol>
+
+        {first && (
+          <a class="begin" href={lessonHref(first.id, course.data.group)}>
+            Start reading
+            <span>{first.data.title}</span>
+          </a>
+        )}
+      </article>
+    ))}
+
+    {planned.length > 0 && (
+      <section class="after">
+        <h2>Next</h2>
+        <ul>
+          {planned.map((subtopic) => (
+            <li>
+              <span class="next-title">{subtopic.title}</span>
+              <span class="next-line">{subtopic.tagline}</span>
+              {subtopic.planned && <span class="tally">{subtopic.planned} lessons planned</span>}
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
+
+    <footer class="colophon">
+      <p>
+        Open source, MIT for the code and CC BY-SA for the writing. Every lesson
+        is a folder of plain files: the page, its questions and its figure.
+        <code>CONTRIBUTING.md</code> has the shape and the rules.
+      </p>
+    </footer>
+  </div>
+</Base>
+
+<style>
+  .home { max-width: 54rem; }
+
+  /* ── the statement: type alone, no container ─────────────────── */
+  .statement { padding: var(--space-6) 0 var(--space-8); }
+  .statement h1 {
+    font-size: var(--text-3xl);
+    font-weight: var(--weight-bold);
+    letter-spacing: -0.032em;
+    line-height: var(--leading-tight);
+    margin: 0;
+    max-width: 16ch;
+    text-wrap: balance;
+  }
+  .lede {
+    color: var(--ink-2);
+    font-size: var(--text-read);
+    line-height: var(--leading-read);
+    margin: var(--space-5) 0 0;
+    max-width: 58ch;
+  }
+  .terms { color: var(--ink-3); font-size: var(--text-base); margin: var(--space-3) 0 0; max-width: 58ch; }
+
+  /* ── the course: the one raised object on the page ───────────── */
+  .course {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow);
+    padding: var(--space-6) clamp(var(--space-4), 3vw, var(--space-7));
+  }
+  .course-head {
+    align-items: start;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+    justify-content: space-between;
+    padding-bottom: var(--space-5);
+  }
+  .course-head h2 { font-size: var(--text-2xl); letter-spacing: -0.02em; margin: 0; }
+  .course-head h2 a { color: var(--ink); text-decoration: none; }
+  .course-head h2 a:hover { color: var(--tint-teal-ink); }
+  .course-line { color: var(--ink-2); font-size: var(--text-read); margin: var(--space-2) 0 0; }
+  .count { color: var(--ink-3); font-family: var(--font-mono); font-size: var(--text-xs); margin: 0; text-align: right; }
+  .count b { color: var(--ink); font-size: var(--text-xl); font-weight: var(--weight-bold); }
+  .count span { display: block; margin-top: 2px; }
+
+  /* ── the chapter spine ───────────────────────────────────────── */
+  .spine { list-style: none; margin: var(--space-5) 0 0; padding: 0; }
+  .spine li {
+    align-items: baseline;
+    display: grid;
+    gap: var(--space-3);
+    grid-template-columns: 1.75rem minmax(0, 1fr) auto;
+    padding: var(--space-3) 0;
+    position: relative;
+  }
+  /* the connector, drawn behind the markers */
+  .spine li::before {
+    background: var(--line);
+    content: '';
+    inset-block: 0;
+    left: 4px;
+    position: absolute;
+    width: 1px;
+  }
+  .spine li:first-child::before { top: 50%; }
+  .spine li:last-child::before { bottom: 50%; }
+  .marker {
+    align-items: center;
+    color: var(--ink-3);
+    display: inline-flex;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    gap: var(--space-2);
+    position: relative;
+  }
+  .marker i {
+    background: var(--canvas);
+    border: 1px solid var(--line-2);
+    border-radius: 50%;
+    height: 9px;
+    width: 9px;
+  }
+  .written .marker { color: var(--ink); }
+  .written .marker i { background: var(--tint-teal-ink); border-color: var(--tint-teal-ink); }
+  .spine a { color: var(--ink); font-weight: var(--weight-medium); text-decoration: none; }
+  .spine a:hover { color: var(--tint-teal-ink); text-decoration: underline; }
+  .pending { color: var(--ink-3); }
+  .tally { color: var(--ink-3); font-family: var(--font-mono); font-size: var(--text-xs); }
+
+  /* ── the one call to action ──────────────────────────────────── */
+  .begin {
+    align-items: baseline;
+    background: var(--tint-teal-ink);
+    border-radius: var(--radius);
+    color: var(--card);
+    display: inline-flex;
+    flex-wrap: wrap;
+    font-size: var(--text-base);
+    font-weight: var(--weight-semibold);
+    gap: var(--space-2);
+    margin-top: var(--space-5);
+    padding: var(--space-3) var(--space-5);
+    text-decoration: none;
+  }
+  .begin span { font-weight: var(--weight-regular); opacity: 0.82; }
+  .begin:hover { filter: brightness(1.12); }
+
+  /* ── what is coming, and the colophon: rules, not cards ──────── */
+  .after { border-top: 1px solid var(--line); margin-top: var(--space-8); padding-top: var(--space-5); }
+  .after h2 { color: var(--ink-3); font-size: var(--text-base); font-weight: var(--weight-medium); margin: 0 0 var(--space-4); }
+  .after ul { display: grid; gap: var(--space-4); list-style: none; margin: 0; padding: 0; }
+  .after li { display: grid; gap: var(--space-1); grid-template-columns: minmax(0, 1fr) auto; }
+  .next-title { color: var(--ink-2); font-weight: var(--weight-medium); }
+  .next-line { color: var(--ink-3); font-size: var(--text-sm); grid-column: 1; max-width: 52ch; }
+  .after .tally { align-self: start; grid-column: 2; grid-row: 1; }
+
+  .colophon { border-top: 1px solid var(--line); margin-top: var(--space-7); padding-top: var(--space-5); }
+  .colophon p { color: var(--ink-3); font-size: var(--text-sm); line-height: var(--leading-read); margin: 0; max-width: 62ch; }
+
+  @media (max-width: 560px) {
+    .count { text-align: left; }
+    .spine li { grid-template-columns: 1.75rem minmax(0, 1fr); }
+    .spine .tally { grid-column: 2; }
+    .after li { grid-template-columns: minmax(0, 1fr); }
+    .after .tally { grid-column: 1; grid-row: auto; }
+  }
+</style>

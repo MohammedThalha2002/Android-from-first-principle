@@ -1,0 +1,58 @@
+<svg viewBox="0 0 700 330" role="img" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="dg-arrow-th" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-accent)"/>
+    </marker>
+  </defs>
+
+  <g data-part="process">
+    <rect x="16" y="14" width="490" height="302" rx="10" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="32" y="38" font-family="var(--font-mono)" font-size="12" fill="var(--dg-muted)">one process, one address space</text>
+  </g>
+
+  <g data-part="main">
+    <rect x="32" y="52" width="180" height="40" rx="5" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="46" y="77" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">main</text>
+    <text x="112" y="77" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">your code</text>
+  </g>
+
+  <g data-part="render">
+    <rect x="32" y="100" width="180" height="40" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="46" y="125" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">RenderThread</text>
+  </g>
+
+  <g data-part="binder">
+    <rect x="32" y="148" width="180" height="40" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="46" y="173" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">binder</text>
+  </g>
+
+  <g data-part="gc">
+    <rect x="32" y="196" width="180" height="40" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="46" y="221" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">HeapTaskDaemon</text>
+  </g>
+
+  <g data-part="stacks">
+    <rect x="228" y="52" width="92" height="40" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="274" y="77" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">its stack</text>
+    <rect x="228" y="100" width="92" height="40" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="274" y="125" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">its stack</text>
+    <rect x="228" y="148" width="92" height="40" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="274" y="173" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">its stack</text>
+    <rect x="228" y="196" width="92" height="40" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="274" y="221" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">its stack</text>
+    <text x="274" y="34" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">private</text>
+  </g>
+
+  <g data-part="heap">
+    <rect x="32" y="250" width="288" height="52" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="176" y="272" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">the heap: every object you made</text>
+    <text x="176" y="292" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">shared by all four, same addresses</text>
+  </g>
+
+  <g data-part="screen">
+    <rect x="556" y="56" width="128" height="130" rx="10" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="620" y="112" text-anchor="middle" font-family="var(--font-ui)" font-size="13" fill="var(--dg-label)">the screen</text>
+    <text x="620" y="132" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">main only</text>
+    <path d="M324 72 C 420 72 470 88 548 106" fill="none" stroke="var(--dg-accent)" stroke-width="2" marker-end="url(#dg-arrow-th)"/>
+  </g>
+</svg>

@@ -1,0 +1,18 @@
+---
+/**
+ * A pill. `status` colours it by content stage; `tint` by category. Pass at
+ * most one — a status chip is never also a category chip.
+ */
+import type { Tint } from '../data/groups';
+
+interface Props {
+  status?: 'new';
+  tint?: Tint | 'accent';
+  dot?: boolean;
+}
+const { status, tint, dot = false } = Astro.props;
+---
+<span class="chip" data-status={status} data-tint={tint}>
+  {dot && <i class="chip-dot" aria-hidden="true"></i>}
+  <slot />
+</span>

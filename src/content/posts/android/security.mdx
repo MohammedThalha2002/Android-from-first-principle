@@ -1,0 +1,316 @@
+---
+title: "Security"
+navTitle: "Security"
+summary: "Permissions, scoped storage, identifiers, the APK as public, KeyStore and biometrics, and what pinning and R8 are not."
+readingTime: "2 hours"
+minutes: 130
+tags: ["runtime permission","shouldshowrequestpermissionrationale","one-time grant","auto-revoke","data minimisation","photo picker","advertising id","ssaid","appsetid","jadx","apktool","r8 obfuscation","intent redirection","task hijacking","tapjacking","addjavascriptinterface","keystore","aes-gcm","biometricprompt","play integrity"]
+draft: true
+date: "2026-06-06"
+subtopic: "android-internals"
+subtopicOrder: 10
+part: "II"
+verifiedAgainst: "compileSdk 36 · AGP 8.13"
+stage: "outline"
+labModule: ":ch10-security"
+sources: ["03-component-model-manifest-and-intents#The security surface","14-local-persistence-and-storage#Encryption at rest","19-permissions-privacy-and-app-security#The permission model","19-permissions-privacy-and-app-security#Requesting well","19-permissions-privacy-and-app-security#Privacy-by-design","19-permissions-privacy-and-app-security#Identifiers","19-permissions-privacy-and-app-security#The app is public","19-permissions-privacy-and-app-security#Attack surface on the device","19-permissions-privacy-and-app-security#Cryptography that survives review","19-permissions-privacy-and-app-security#Client integrity","19-permissions-privacy-and-app-security#Standards &amp; process","19-permissions-privacy-and-app-security#Failure modes","19-permissions-privacy-and-app-security#Cheat-sheet"]
+---
+Two assumptions, and everything in this chapter follows from them.
+
+**The APK is public.** It is on millions of devices, and anyone can decompile it in about thirty seconds. Every string, every endpoint, every "hidden" key is readable.
+
+**The device is compromised.** Some fraction of your installs are rooted, running a hooking framework, or behind an intercepting proxy. The user of a device is the owner of that device, and they can inspect and modify anything your app does on it.
+
+If those feel pessimistic, they are simply true, and designing without them produces the security bugs that get published. The consequence is a single rule that recurs throughout: **the only trustworthy check is a server-side one.**
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## The security surface
+
+Everything published in the manifest is an entry point, and an entry point is an attack surface. Chapter 10 is the full treatment; this is the part that is inherent to the component model.
+
+**Exported components.** An exported Activity can be started by any app with any extras. If it acts on those extras without validation — deleting an account, exposing a screen behind a login — that is the vulnerability. Export only what must be reachable, and treat everything arriving in an `Intent` as untrusted input.
+
+**Intent redirection**, the confused deputy. Your exported component receives an `Intent` as an extra and starts it:
+
+```kotlin
+// Dangerous: you are starting an attacker-supplied intent with YOUR privileges.
+val next = intent.getParcelableExtra<Intent>("next")
+startActivity(next)
+```
+
+A malicious app supplies an intent pointing at one of your *non-exported* components, or at a `content://` URI it cannot read itself, and your app performs the access. Never start an intent you received; if you must, verify the target component belongs to you.
+
+**Task hijacking.** `taskAffinity` and `launchMode` can place another app's Activity into your task, so a back press lands somewhere unexpected. Chapter 5 covers tasks; the mitigation is to leave `taskAffinity` alone and avoid `singleTask` unless you can say why.
+
+**Signature permissions** restrict a component to apps signed with the same key — the correct mechanism for a private interface between two apps you publish.
+
+## Encryption at rest
+
+Start with what you already have. **Full-disk or file-based encryption is on by default** on every modern Android device, so data at rest is already encrypted against someone who takes the phone while it is locked.
+
+That means encrypting everything again is often **theatre** — it protects against nothing extra while adding a key-management failure mode where users lose data. Encrypt what has real value if extracted: tokens, keys, health or financial records.
+
+**The KeyStore** is the mechanism, and its property is that the key material never enters your process. You ask the KeyStore to encrypt; the key stays in hardware:
+
+```kotlin
+val spec = KeyGenParameterSpec.Builder("token_key", PURPOSE_ENCRYPT or PURPOSE_DECRYPT)
+    .setBlockModes(BLOCK_MODE_GCM)
+    .setEncryptionPaddings(ENCRYPTION_PADDING_NONE)
+    .setUserAuthenticationRequired(true)     // gated behind biometric or device credential
+    .build()
+```
+
+**StrongBox** puts the key in a separate security chip where available. **Key attestation** lets a server verify a key really is hardware-backed (ch. 10).
+
+Two practical requirements: **AES-GCM with a fresh IV every time** — reusing an IV with GCM is a catastrophic break, not a minor weakness — and biometric gating via `BiometricPrompt` with a `CryptoObject`, so the key is usable only after the user authenticates.
+
+Note that Jetpack Security's `EncryptedSharedPreferences` and `EncryptedFile` are deprecated; the current path is KeyStore-backed encryption applied to DataStore or Room yourself.
+
+## The permission model
+
+Permissions come in tiers by how much they can hurt.
+
+| Tier | Granted | Examples |
+|---|---|---|
+| Normal | at install, silently | `INTERNET`, `VIBRATE` |
+| Dangerous (runtime) | by the user, at runtime | camera, location, contacts |
+| Special access | via a Settings screen | overlay, all-files, exact alarms (ch. 9) |
+| Signature | to apps signed with the same key | your own app suite (ch. 6) |
+
+**Runtime permissions are grouped**, and the grouping is user-facing: granting one camera permission does not silently grant microphone, but related permissions in a group may be granted together. Never assume a specific permission is held because a sibling is — check the one you need.
+
+**One-time grants** <ApiLevel min="30" /> let a user say "only this once", after which the permission is revoked when your app stops. Code that checks a permission at startup and caches the result is wrong: **check at the point of use, every time.**
+
+**Auto-revoke and hibernation** <ApiLevel min="30" /> strip permissions from apps unused for a few months and stop their background work. An app returning after a long absence must handle permissions it previously had.
+
+## Requesting well
+
+Grant rates are a design outcome, and the difference between good and bad practice is large.
+
+**Request in context.** A camera permission asked when the user taps a camera button explains itself. The same request on first launch, before they have seen anything, is a dialog about an app they do not yet trust.
+
+**Show rationale before the system dialog, when appropriate:**
+
+```kotlin
+when {
+    hasPermission(CAMERA) -> takePhoto()
+    shouldShowRequestPermissionRationale(CAMERA) -> showWhyDialog()   // they denied once
+    else -> launcher.launch(CAMERA)
+}
+```
+
+`shouldShowRequestPermissionRationale` returns true only after a denial — that is the moment an explanation is useful. Showing it before the first ask adds a dialog for no reason.
+
+**Permanent denial** is the state to design for. After the user denies twice, the system dialog no longer appears and `launch` silently does nothing. Detect it — no permission, and rationale is false after an attempt — and send the user to Settings with an explanation.
+
+**Degrade rather than block.** An app that refuses to function without an optional permission converts a "no" into an uninstall. A gallery without camera permission can still show a gallery.
+
+**A permission wall on first launch destroys grant rates.** Users deny what they do not understand, denial is sticky, and you rarely get a second chance.
+
+## Privacy-by-design
+
+The cheapest way to be secure with data is not to have it.
+
+**Data minimisation.** Every field you collect is a field you must declare (Play Data Safety), protect, and disclose in a breach. Collecting "just in case" is a liability with no benefit.
+
+**Approximate over precise location.** <ApiLevel min="31" /> users can grant approximate only. Most features that ask for precise — a weather forecast, nearby stores — work fine with approximate. Ask for what you need.
+
+**Background location is a separate, harder flow** and triggers a Play review requiring a video demonstration of why. If a feature works with while-in-use, do not ask for background.
+
+**Use the pickers.** The **Photo Picker** (ch. 15) needs no permission at all — the user selecting a photo *is* the grant. Requesting `READ_MEDIA_IMAGES` to show your own gallery is worse UX and a Data Safety liability for no gain. The same for the document picker and the contact picker.
+
+**Play Data Safety must match reality.** It is a declaration of what your app and its SDKs collect. A mismatch — usually an analytics SDK collecting something nobody declared — is a policy violation with real consequences (ch. 20).
+
+**Consent** under GDPR, CCPA and India's DPDP means gates that must actually gate: no tracking identifiers, no analytics, before consent. A consent dialog that fires the tracker anyway is the failure regulators look for.
+
+## Identifiers
+
+**There is no device ID any more**, and the reasons are worth knowing so you stop looking for one.
+
+| Identifier | Scope | Resets |
+|---|---|---|
+| `SSAID` | per app-signing-key, per user, per device | on factory reset |
+| `AppSetId` | per developer, per device | when all your apps are uninstalled |
+| Advertising ID | per device, user-visible | user can reset or **delete** it |
+| Firebase Installations | per app install | on reinstall or clearing data |
+
+IMEI, MAC address and serial number are unavailable to normal apps. That was deliberate: they were permanent and cross-app, which made them perfect tracking keys.
+
+**Advertising ID can be zeroed.** When a user opts out you receive zeros, and treating that as a real id gives you one bucket containing every opted-out user. Handle it.
+
+**Fingerprinting is a policy violation.** Deriving a stable identifier from device characteristics to work around resettable IDs will get an app removed. If you need a stable per-user id, use an account.
+
+## The app is public
+
+The demonstration that changes how people write code. Take your own release APK:
+
+```bash
+jadx-gui app-release.apk        # decompiled, browsable Java, in seconds
+apktool d app-release.apk       # resources and a readable manifest
+strings lib/arm64-v8a/libnative.so | grep -i key    # native libraries are not a hiding place
+```
+
+Everything is there: your endpoints, your logic, your `BuildConfig` fields, the strings in your native library.
+
+**Every secret in the APK is extractable.** `BuildConfig.API_KEY`, an obfuscated string, a key assembled at runtime, a key in C++ — all recoverable, differing only in how many minutes it takes.
+
+**So the only real answer is server-side authority.** The client asks; the server decides. A key that must remain secret lives on your backend, and the client authenticates as a user rather than carrying a shared secret.
+
+**R8 obfuscation is friction, not security** (ch. 2). Renaming classes slows a casual reader and does nothing against a determined one. It is worth enabling for size and for raising the cost — and worth nothing as a protection you rely on.
+
+The practical implication is a review question for any feature: *what happens if the user modifies the client?* If the answer is "they get something they should not", the check is in the wrong place.
+
+## Attack surface on the device
+
+The concrete list, in rough order of how often it appears.
+
+<Diagram
+  caption="Everything you publish is a way in. Each arrow is an entry point an attacker controls the input to — which is why every one of them validates, and none of them trusts."
+  label="Attack surface diagram: another app can reach your app through exported components, deep links, PendingIntents, content providers and file provider grants; the web reaches it through WebView content; and each is an entry point whose input must be validated."
+>
+  <svg viewBox="0 0 660 268" width="660" height="268">
+    <rect x="232" y="88" width="196" height="90" rx="10" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="330" y="118" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-accent)">YOUR APP</text>
+    <text x="330" y="138" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">your UID, your data</text>
+    <text x="330" y="156" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">your permissions</text>
+
+    <rect x="12" y="26" width="172" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="98" y="46" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">exported components</text>
+    <rect x="12" y="64" width="172" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="98" y="84" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">deep links, custom schemes</text>
+    <rect x="12" y="102" width="172" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="98" y="122" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">intent redirection</text>
+    <rect x="12" y="140" width="172" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="98" y="160" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">mutable PendingIntent</text>
+    <rect x="12" y="178" width="172" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="98" y="198" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">provider, FileProvider</text>
+    <text x="98" y="224" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">reached by ANOTHER APP</text>
+
+    <path d="M184 41 L232 100M184 79 L232 108M184 117 L232 122M184 155 L232 140M184 193 L232 158" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+
+    <rect x="476" y="46" width="172" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="562" y="66" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">WebView JS bridge</text>
+    <rect x="476" y="84" width="172" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="562" y="104" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">server responses</text>
+    <rect x="476" y="122" width="172" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="562" y="142" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">files, ZIP entries</text>
+    <rect x="476" y="160" width="172" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="562" y="180" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">a modified client</text>
+    <text x="562" y="206" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">reached by THE NETWORK</text>
+    <text x="562" y="220" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">or the device owner</text>
+
+    <path d="M476 61 L428 106M476 99 L428 116M476 137 L428 132M476 175 L428 150" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+
+    <text x="330" y="252" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">Every arrow carries input an attacker chose. Validate at each one — and put the</text>
+    <text x="330" y="264" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">real authorisation on the server, because the client is theirs.</text>
+  </svg>
+</Diagram>
+
+**Exported components** (ch. 6). Anything exported can be started by any app with any extras. Validate every input; export only what must be reachable.
+
+**Intent redirection** — your exported component receives an `Intent` as an extra and starts it, using your privileges to reach your own non-exported components or a `content://` URI the caller cannot read. Never start an intent you received without verifying its target belongs to you.
+
+**Deep-link hijacking** — an unverified custom scheme can be claimed by any app. Use App Links with `autoVerify` (ch. 6).
+
+**Task hijacking** — `taskAffinity` and `launchMode` letting another app place an Activity in your task (ch. 5). Leave affinity alone.
+
+**WebView** (appendix B). `addJavascriptInterface` exposes a Kotlin object to page JavaScript; with untrusted content that is remote code execution. Use `addWebMessageListener` instead. Disable `allowFileAccess` and `allowUniversalAccessFromFileURLs` unless you know you need them.
+
+**Mutable `PendingIntent`** (ch. 6) — a capability handed to another process. `FLAG_IMMUTABLE`.
+
+**Insecure `FileProvider` grants** — over-broad `paths` configuration exposing your whole data directory rather than one folder.
+
+**Tapjacking** — an overlay tricking the user into tapping your UI. `setFilterTouchesWhenObscured` on sensitive controls.
+
+**Content-provider SQL injection** — string-concatenated selections in a provider. Use parameterised queries; Room does this for you (ch. 15).
+
+**Path traversal in ZIP handling** — an archive entry named `../../databases/app.db` writing outside the target directory. Validate every entry's canonical path before writing.
+
+## Cryptography that survives review
+
+**The KeyStore** (ch. 15) is the foundation: key material never enters your process, so a memory dump does not yield it. `setUserAuthenticationRequired` binds a key to biometric or device-credential authentication; **StrongBox** puts it in dedicated hardware; **key attestation** lets your server verify the key really is hardware-backed.
+
+**AES-GCM, with a fresh IV every time.** Reusing an IV with GCM is not a weakening — it is a catastrophic break that reveals plaintext relationships and can leak the authentication key. Generate a random IV per encryption and store it alongside the ciphertext; it is not secret.
+
+**`BiometricPrompt` with a `CryptoObject`** is what makes biometrics meaningful. A prompt that merely returns "success" is a boolean an attacker can bypass on a modified client; a prompt that unlocks a KeyStore key means the data is genuinely unreadable without authentication. Always offer a device-credential fallback — biometrics fail, and users have wet hands.
+
+**Jetpack Security's `EncryptedSharedPreferences` and `EncryptedFile` are deprecated**; use KeyStore-backed encryption applied to DataStore or Room yourself.
+
+**The "encrypt everything" fallacy.** Device encryption already protects data at rest on a locked device (ch. 15). Encrypting everything again adds a key-management failure mode — users losing data after a restore — while protecting against very little extra. Encrypt what has real value if extracted.
+
+## Client integrity
+
+**Play Integrity** tells your *server* whether a request came from a genuine app binary on a genuine device. The key detail: **the verdict must be verified server-side**. A client that checks its own integrity verdict is asking an attacker whether they are an attacker.
+
+It can tell you the binary is unmodified, the device passes basic integrity, and the install came from Play. It cannot tell you the user is honest, and it will produce false negatives on legitimate devices — custom ROMs, some enterprise builds, emulators used by real developers. Treat it as a **risk signal**, not a gate, or you will lock out real users.
+
+**Root and hooking detection** (Frida, Xposed) raises cost and does not prevent. Every check is code an attacker can find and patch, because it runs on their device.
+
+**Certificate pinning** (ch. 16) — a genuine defence against interception, with a genuine outage risk. Consider carefully.
+
+**Never use a client check as the sole authorisation.** "The button is hidden unless the user is an admin" is a UI decision. The server must also refuse.
+
+## Standards &amp; process
+
+**OWASP MASVS** is the requirements standard and **MASTG** the testing guide. Together they are the closest thing to an industry checklist, and running through MASVS once for a feature finds more than an unstructured review.
+
+**Threat modelling a feature** is four questions: what data is involved, who might want it, what are the entry points (every exported component, every deep link, every IPC surface), and what happens if the client is modified.
+
+**In CI** (ch. 20): dependency vulnerability scanning, an SBOM, secret scanning so a key never reaches the repository, and a lint rule against `addJavascriptInterface` and mutable `PendingIntent`.
+
+**A release checklist:** no debuggable build shipped, no logging of tokens or personal data (ch. 16), `usesCleartextTraffic` off, every exported component reviewed, Data Safety matching reality, R8 enabled, no test endpoints in the release config.
+
+## Failure modes: Permissions & security
+
+**A hardcoded API key is found in your APK.** *Symptom:* a security report, or unexplained quota use. *Cause:* a secret shipped in the client. *Fix:* move it server-side; rotate the key, because it is compromised.
+
+**An exported Activity is used to reach a screen behind login.** *Symptom:* a vulnerability report. *Cause:* `exported="true"` on a component that trusts its extras. *Fix:* `exported="false"`; validate all input; never start a received intent.
+
+**A rooted-device check is bypassed instantly.** *Symptom:* modified clients working normally. *Cause:* a client-side check on the attacker's device. *Fix:* server-side authority; Play Integrity as a signal.
+
+**Deep links open in another app.** *Symptom:* your links land elsewhere. *Cause:* an unverified custom scheme. *Fix:* App Links with `autoVerify` (ch. 6).
+
+**Very low permission grant rates.** *Symptom:* most users deny. *Cause:* asked on first launch with no context. *Fix:* ask at the point of use, with rationale after a denial.
+
+**A Data Safety rejection.** *Symptom:* Play rejects an update. *Cause:* an SDK collecting something undeclared. *Fix:* audit what SDKs collect; the merged manifest and network logs tell you.
+
+**Encrypted data unreadable after restore.** *Symptom:* users lose data after switching devices. *Cause:* KeyStore keys do not survive; the ciphertext was backed up. *Fix:* exclude it from backup (ch. 15).
+
+## Cheat-sheet: Permissions & security
+
+```bash
+# what an attacker sees, in under a minute
+jadx-gui app-release.apk
+apktool d app-release.apk && cat app-release/AndroidManifest.xml
+strings lib/arm64-v8a/*.so | grep -iE 'key|secret|token'
+
+# your own attack surface
+adb shell dumpsys package <pkg> | grep -B2 -A4 "exported=true"
+adb shell am start -n <pkg>/.SomeActivity --es evil "payload"   # can I start it?
+```
+
+```kotlin
+// check at the point of use, never cached
+if (checkSelfPermission(CAMERA) != GRANTED) { requestOrExplain(); return }
+
+// a PendingIntent is a capability
+PendingIntent.getActivity(ctx, code, intent, FLAG_IMMUTABLE)
+
+// AES-GCM: a fresh IV, every single time
+val iv = ByteArray(12).also(SecureRandom()::nextBytes)
+```
+
+| Assumption | Consequence |
+|---|---|
+| the APK is public | no secrets in the client |
+| the device is compromised | no client-side authorisation |
+| the user can modify the client | the server validates everything |
+| every export is an entry point | validate all input |
+| obfuscation is friction | never a protection you rely on |
+
+<LabCard module=":ch19-security">
+Attack your own app, then fix it. Extract a hardcoded key from your release APK with `jadx`. Hijack an unverified deep link from a second app you write. Exploit an exported Activity by starting it with a crafted intent. Then fix all three and **prove the fix by re-running the same attack** — the proof is the point, because a fix you did not verify is a belief.
+</LabCard>

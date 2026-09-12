@@ -1,0 +1,384 @@
+---
+title: "Threads: many paths through one process"
+motto: "Threads share everything except where they are. One of them is allowed to touch the screen."
+course: android-internals
+chapter: 1
+lesson: 3
+type: mechanism
+minutes: 22
+prerequisites: ["1.1", "1.2"]
+objectives:
+  - "Say what a thread is and what two threads in one process share"
+  - "Name four threads your app has that you did not create"
+  - "Explain why only one thread may touch the user interface"
+  - "Say which thread your own code is running on, in the common cases"
+terms: ["thread", "stack", "main thread"]
+verifiedOn: "documentation checked; device transcripts still to capture"
+stage: published
+---
+
+## You will
+
+- Say what a thread is and what two threads in one process share
+- Name four threads your app has that you did not create
+- Explain why only one thread may touch the user interface
+- Say which thread your own code is running on, in the common cases
+
+## The question
+
+Early on, everyone does this. You start a thread to load something, and when it
+finishes you set the text on a view. The app dies:
+
+```console
+android.view.ViewRootImpl$CalledFromWrongThreadException: Only the original
+thread that created a view hierarchy can touch its views.
+```
+
+You wrap the update in `runOnUiThread`, or move it into a `withContext(Main)`,
+and it works. Then you move on, carrying this:
+
+> The UI thread is special. Android just doesn't let you touch views from
+> anywhere else.
+
+Which is the error message repeated back. It does not say what a thread is,
+which thread the rest of your code was on, or why one of them gets the screen.
+
+What most developers picture:
+
+```text
+my code
+   ↓
+the UI thread
+   ↓
+   the rest
+```
+
+What is actually in your process:
+
+```text
+one process, one address space
+ ├── main            your callbacks, the UI
+ ├── RenderThread    drawing
+ ├── binder          calls from other processes
+ └── HeapTaskDaemon  garbage collection
+        all sharing the same memory
+        each with its own stack
+```
+
+You created none of them.
+
+## What is actually happening
+
+### A thread is one path of execution
+
+The process from lesson 1.1 holds the memory. A **thread** is one path running
+through it: a sequence of instructions, currently somewhere in some function.
+
+One process can have many. They all live in the one address space you met in
+lesson 1.2, which means they share one page table and therefore see exactly the
+same memory. An object created on one thread is immediately visible to every
+other, at the same address, with no copying and no message passing.
+
+### What each one keeps to itself
+
+A thread's own possession is its **stack**: its local variables and the chain
+of calls that got it where it is. That is why a stack trace is always the trace
+of one thread, and why a crash report showing you one stack is showing you one
+path out of several.
+
+Everything else, all the objects your app has made, is shared.
+
+<Figure src="hero" caption="One process, one address space, four threads. The heap is shared, each stack is private, and only one thread reaches the screen." />
+
+### Your app has threads it did not create
+
+Start an app that never mentions threads anywhere and it is running about a
+dozen. The four worth knowing:
+
+```text
+main            your callbacks, your composables, every frame
+RenderThread    hands your drawing to the GPU
+binder:NNNN     waits for calls arriving from other processes
+HeapTaskDaemon  garbage collection
+```
+
+Two of those names will come back. `binder` is chapter 4. `RenderThread` is
+chapter 6.
+
+### One of them is allowed to touch the screen
+
+The **main thread** is the one Android calls when your Activity starts, when a
+button is pressed, when a composable recomposes. It is also the only one
+allowed to touch the user interface.
+
+The reason is a trade, not a decree. The toolkit could have been made safe for
+many threads, and that would mean taking a lock around every read and write of
+every view, sixty times a second, on every element on screen. Locks cost
+something, and a deadlock in the middle of drawing is far harder to find than a
+rule to follow.
+
+So Android took the other side: no locks anywhere in the drawing path, and one
+thread that is permitted. The exception you hit is that rule being enforced
+rather than assumed.
+
+Think of the process as a workshop. The tools and materials are shared, each
+worker carries their own notebook of what they are doing, and exactly one of
+them is allowed to touch the finished piece in the window. The analogy stops at
+the last part: it is not seniority, it is that nobody is watching for two
+workers reaching at once.
+
+The main thread also produces every frame, which is why a slow call on it stops
+the screen rather than slowing it down. What it costs, and why the other cores
+cannot help, is the next lesson.
+
+<Check n={1} />
+
+## Connect it to your code
+
+Most of the confusion here is not about threads. It is about not knowing which
+thread a given line is on.
+
+```kotlin
+// ui/ArticleViewModel.kt
+fun refresh() {
+    viewModelScope.launch {
+        // still the main thread: launching is not switching
+        val articles = database.articleDao().loadAll()
+        state = articles
+    }
+}
+```
+
+Starting a coroutine does not leave the thread you were on. `viewModelScope`
+begins on the main dispatcher, so that database call is running exactly where
+the click handler was.
+
+> Before asking whether code is slow, ask which thread it is on. Half of the
+> answers people give about threading are guesses about that.
+
+Where your code actually runs:
+
+| What you wrote | Which thread |
+|---|---|
+| A click handler, a lifecycle callback, a composable | main |
+| The body of `viewModelScope.launch { }` | main, until it suspends |
+| The body of `withContext(Dispatchers.IO) { }` | one of a pool of background threads |
+| A `suspend` function from Room or Retrofit | a background thread, then back to main |
+
+The last row is why the fix in most codebases is one word: call the suspending
+version, and the library moves the work for you.
+
+<Check n={2} />
+
+## See it on your phone (optional)
+
+You can skip this. Nothing later depends on it.
+
+`ps` lists processes. Adding `-T` makes it list threads instead, so you can see
+inside your own process.
+
+{/* VERIFY: capture on the verification device before this leaves draft */}
+
+```bash
+adb shell ps -AT | grep firstprinciples
+```
+
+```console
+u0_a412  9871  9871  ... dev.firstprinciples.android
+u0_a412  9871  9884  ... HeapTaskDaemon
+u0_a412  9871  9897  ... binder:9871_2
+u0_a412  9871  9903  ... RenderThread
+```
+
+Every line is one thread of the same process, which is why the first number
+repeats. The thread whose id matches the process id is the main thread, and it
+carries the process name rather than a name of its own. Your own list will be
+longer than this, and the names of the extra ones depend on what your app and
+its libraries started.
+
+## When it breaks
+
+**Touching a view from another thread.**
+
+```console
+android.view.ViewRootImpl$CalledFromWrongThreadException: Only the original
+thread that created a view hierarchy can touch its views.
+```
+
+The message names the actual rule, which is unusually helpful. It is thrown by
+the toolkit, in your process, at the moment the rule is broken.
+
+**A network call on the main thread.**
+
+```console
+android.os.NetworkOnMainThreadException
+```
+
+One of the very few things the platform refuses outright rather than letting you
+be slow, because a network call has no bound on how long it takes. Worth
+noticing what does not throw: reading a file or a database on the main thread is
+allowed, and simply freezes.
+
+<Check n={3} />
+
+## Your notes
+
+```text
+PROCESS  one address space, one page table
+ ├── main            your code, and every frame
+ ├── RenderThread    drawing
+ ├── binder          calls from other processes
+ └── HeapTaskDaemon  garbage collection
+
+SHARED   the heap: every object, one address
+PRIVATE  each thread's stack
+
+only main may touch the UI
+   ↓ why
+no locks in the drawing path
+   ↓ enforced by
+CalledFromWrongThreadException
+```
+
+- A thread is one path of execution through a process.
+- Threads share the address space, so they see the same objects at the same
+  addresses.
+- Each thread has its own stack, which is why a stack trace covers one thread.
+- Your app has threads it never created, and two of their names return later.
+- Only the main thread may touch the UI, because the toolkit has no locks.
+- Starting a coroutine does not change which thread you are on.
+
+## Interview questions
+
+Answer out loud first, then open the model answer.
+
+**1. (Easy)** What is a thread, and what do two threads in one process share?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- A thread is one path of execution through a process.
+- Threads in one process share the address space, so they see the same objects
+  at the same addresses.
+- Each has its own stack, holding its locals and its call chain.
+- Sharing memory is what makes them cheap to coordinate and easy to get wrong.
+
+**A weak answer** says threads run in parallel and stops. What they share is
+where both the speed and the bugs come from.
+</details>
+
+**2. (Easy)** Name four threads your app has that you did not create.
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- `main`, running your callbacks and producing every frame.
+- `RenderThread`, handing the drawing to the GPU.
+- A binder thread, waiting for calls from other processes.
+- A garbage collection thread such as `HeapTaskDaemon`.
+
+**A weak answer** lists "main thread, UI thread, background thread": the first
+two are one thread with two names, and the third is not something the platform
+gave you.
+</details>
+
+**3. (Medium)** Why is the UI toolkit single-threaded? Other systems manage
+concurrent interfaces.
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Making it thread-safe means locking view state on every frame, for every
+  element.
+- That cost lands in the one path with a hard deadline.
+- It also converts a rule you can follow into deadlocks you cannot reproduce.
+- So the platform allows one thread and throws when the rule is broken.
+
+**A weak answer** says "that is how Android was designed". The question is
+asking for the trade, and there is a real one.
+</details>
+
+**4. (Medium)** A developer wraps a slow database read in
+`viewModelScope.launch { }` and the screen still freezes. What did they miss?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- `viewModelScope` starts on the main dispatcher, so the body begins on the
+  main thread.
+- Launching a coroutine is not switching threads.
+- Only a dispatcher, or a suspending function that switches internally, moves
+  the work.
+- The usual fix is the library's suspending API, or `withContext`.
+
+**A weak answer** assumes anything inside a coroutine is off the main thread,
+which is the single most common threading misunderstanding in Android code.
+</details>
+
+**5. (Hard)** A crash report shows one stack trace. What does that tell you
+about the other threads in the process?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Nothing at all: a stack belongs to one thread.
+- Another thread could have been mid-way through corrupting the state that
+  caused this.
+- That is why a report that captures every thread, such as an ANR trace, is a
+  different and sometimes more useful artefact.
+- It is also why a bug involving two threads rarely shows both of them in the
+  evidence.
+
+**A weak answer** treats the stack as a picture of the app. It is a picture of
+one path through it.
+</details>
+
+**6. (The one that matters)** Explain threads to an interviewer in four
+sentences.
+
+<details>
+<summary>Model answer</summary>
+
+A process owns an address space, and a thread is one path of execution running
+through it. Threads in the same process share that address space, so they see
+the same objects at the same addresses, and each one keeps its own stack for its
+locals and its call chain. Android gives every app several threads it never
+asked for, including one for rendering and some for receiving calls from other
+processes. One of them, the main thread, runs my callbacks and produces every
+frame, and it is the only one allowed to touch the interface, because the
+toolkit avoids locks in the drawing path entirely.
+</details>
+
+## Words you met
+
+| Term | What people say | What it actually means |
+|---|---|---|
+| Thread | "something that runs in the background" | One path of execution through a process. Threads share the address space and each keeps its own stack. [Processes and threads](https://developer.android.com/guide/components/processes-and-threads) |
+| Stack | "where local variables go" | The private memory of one thread, holding its locals and the chain of calls that got it here. A stack trace is one thread's. |
+| Main thread | "the UI thread" | The thread Android calls your code on, the only one permitted to touch the interface, and the one that produces every frame. |
+
+## Go deeper
+
+- [Processes and threads overview](https://developer.android.com/guide/components/processes-and-threads): the platform's statement of the single-thread rule and the second rule it gives alongside it.
+
+**What to skip for now**
+
+- How many threads can genuinely run at once, and what switching costs: the next lesson.
+- The queue the main thread actually runs: lesson 6.1.
+- Dispatchers, structured concurrency and cancellation: the Kotlin course.
+
+## Where this goes next
+
+Your process has several threads and the phone has a handful of cores. The next
+lesson is about who decides which of them runs, what it costs to change, and why
+that makes a coroutine cheaper than a thread.

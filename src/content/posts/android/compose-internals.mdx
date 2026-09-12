@@ -1,0 +1,392 @@
+---
+title: "Compose Internals"
+navTitle: "Compose"
+summary: "The slot table, snapshots, stability and skipping, effects, the three phases. Recomposition performance stops being folklore."
+readingTime: "4 hours"
+minutes: 195
+tags: ["composer","slot table","gap buffer","positional memoisation","snapshot","mutablestate","recomposition","stability","strong skipping","remember","remembersaveable","launchedeffect","disposableeffect","three phases","modifier node","lazycolumn","subcompose","compositionlocal","movablecontentof","semantics"]
+draft: true
+date: "2026-06-27"
+subtopic: "android-internals"
+subtopicOrder: 13
+part: "III"
+verifiedAgainst: "Compose BOM 2026.09 · Kotlin 2.3 · compileSdk 36"
+stage: "outline"
+labModule: ":ch13-compose"
+sources: ["08-jetpack-compose-from-first-principles#The runtime","08-jetpack-compose-from-first-principles#The snapshot system","08-jetpack-compose-from-first-principles#Recomposition","08-jetpack-compose-from-first-principles#State &amp; its ownership","08-jetpack-compose-from-first-principles#Side effects, precisely","08-jetpack-compose-from-first-principles#The three phases","08-jetpack-compose-from-first-principles#Layout","08-jetpack-compose-from-first-principles#Modifiers","08-jetpack-compose-from-first-principles#Lazy layouts","08-jetpack-compose-from-first-principles#Text, graphics &amp; gestures","08-jetpack-compose-from-first-principles#CompositionLocal","08-jetpack-compose-from-first-principles#Performance","08-jetpack-compose-from-first-principles#Testing &amp; tooling","08-jetpack-compose-from-first-principles#Failure modes","08-jetpack-compose-from-first-principles#Cheat-sheet"]
+---
+A composable returns `Unit`. It produces no object, hands back no view, and yet calling it puts something on screen that later changes by itself. That is genuinely strange, and most Compose folklore — "wrap it in `remember`", "make it a `data class`" — exists because people learned the rules without the mechanism.
+
+The mechanism is three things: the **Composer** and its slot table, which remember where you are; the **snapshot system**, which notices reads and writes; and **recomposition**, which re-runs only the parts that read something that changed. Everything else in this chapter follows from those.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## The runtime
+
+Calling a composable does not just execute it. The compiler rewrites every composable to take a hidden **`Composer`** parameter, and the body is instrumented to record what it did.
+
+The Composer writes into a **slot table** — a flat array holding, in call order, the groups and values that composition produced. It is a **gap buffer**: the same structure a text editor uses, cheap to insert into at a moving cursor, because composition writes sequentially.
+
+The key idea is **positional memoisation**. A composable's identity is *its call site*, not its arguments. The third `Text` inside this `Column` occupies a particular region of the table, and on the next composition the runtime returns to that same region.
+
+```kotlin
+Column {
+    Text(a)   // slot region 1
+    Text(b)   // slot region 2 — identity is "second child of this Column"
+}
+```
+
+`remember` is simply "read the value stored in my slot, or compute and store it".
+
+```kotlin
+val formatter = remember { DateFormatter(locale) }   // computed once for this call site
+```
+
+Positional identity breaks where the structure is dynamic. In a list, if an item is inserted at the top, every subsequent item shifts to a different position — so the runtime thinks every item changed. **`key()`** gives an identity independent of position:
+
+```kotlin
+for (article in articles) {
+    key(article.id) { ArticleRow(article) }   // identity travels with the item
+}
+```
+
+That is exactly `setHasStableIds` from chapter 8, and it is why `LazyColumn`'s `key` parameter matters.
+
+## The snapshot system
+
+The second half of the answer: how does the runtime know something changed?
+
+**`MutableState`** is not just a box. Reading it inside composition **subscribes** the current recompose scope to it; writing it **invalidates** every scope that read it. Nobody registers a listener — the dependency graph is built by observing reads.
+
+```kotlin
+var query by remember { mutableStateOf("") }   // this composable now depends on query
+```
+
+Underneath is a **snapshot** system, which is MVCC for UI state. Each snapshot sees a consistent view of every state object; writes go to the snapshot and become visible when it is applied. That is why Compose can safely read state from a background thread and why composition can be abandoned halfway without leaving inconsistent state behind.
+
+Two derived tools follow:
+
+**`derivedStateOf`** — when you read a state frequently but only care about a coarser result:
+
+```kotlin
+// Without this, every pixel of scroll recomposes. With it, only crossing item 0 does.
+val showButton by remember { derivedStateOf { listState.firstVisibleItemIndex > 0 } }
+```
+
+**`snapshotFlow`** converts state reads into a `Flow`, which is the bridge back to chapter 12:
+
+```kotlin
+LaunchedEffect(Unit) {
+    snapshotFlow { listState.firstVisibleItemIndex }
+        .distinctUntilChanged()
+        .collect(analytics::trackScrolledTo)
+}
+```
+
+## Recomposition
+
+Now the performance question can be asked precisely: when state changes, what re-runs?
+
+Not the whole tree. The runtime invalidates the **recompose scopes** that read the changed state — roughly, the enclosing composable function — and re-runs those. A parent recomposing does *not* automatically recompose its children: a child is **skipped** if all its parameters are unchanged.
+
+Skipping requires the compiler to prove "unchanged", and that requires **stability**.
+
+A type is stable when its `equals` is consistent with its behaviour and its public properties do not change without notifying composition. Concretely:
+
+| Stable | Unstable |
+|---|---|
+| primitives, `String` | `List`, `Map`, `Set` (the ch. 12 lie: read-only, not immutable) |
+| `data class` of `val`s of stable types | any class with a `var` |
+| function types (with strong skipping) | a class from a module without the Compose compiler |
+| `@Immutable` / `@Stable` annotated types | interfaces, unless annotated |
+
+```kotlin
+@Immutable                                    // a promise the compiler cannot verify
+data class UiState(val title: String, val items: PersistentList<Article>)
+```
+
+`@Immutable` and `@Stable` are **promises you make**, not checks. Break them — annotate a class whose contents mutate — and you get stale UI that is very hard to diagnose, because the runtime correctly skipped based on your false claim.
+
+**Strong skipping mode**, on by default in recent Compose, relaxes this considerably: composables with unstable parameters can still be skipped by comparing instances, and lambdas are automatically remembered. It removes much of the old ceremony, but it does not remove the value of stable types — comparing an unstable parameter falls back to reference equality, so a new `List` instance with identical contents still counts as changed.
+
+**The compiler metrics report is ground truth.** Not intuition, not this table:
+
+```
+./gradlew assembleRelease \
+  -Pandroid.enableComposeCompilerMetrics=true \
+  -Pandroid.enableComposeCompilerReports=true
+```
+
+It emits, per composable, whether it is skippable and restartable, and per parameter, whether it is stable. When a screen recomposes more than it should, this file names the reason.
+
+## State &amp; its ownership
+
+**`remember`** survives recomposition. **`rememberSaveable`** survives configuration change and process death, by writing into the saved-state `Bundle` — so chapter 5's tiers apply here directly, and the same size limit applies, because that `Bundle` crosses Binder.
+
+```kotlin
+var query by rememberSaveable { mutableStateOf("") }             // survives rotation and death
+val listState = rememberLazyListState()                          // scroll position, already saveable
+val user by remember { mutableStateOf(User()) }                  // survives neither
+```
+
+A custom `Saver` handles a type that is not parcelable.
+
+**State hoisting** is the pattern that makes composables reusable and testable: a *stateless* composable takes its value and an event callback; a *stateful* one owns the state and passes both down.
+
+```kotlin
+// Stateless: no memory, trivially previewable and testable.
+@Composable fun SearchBar(query: String, onQueryChange: (String) -> Unit) { ... }
+
+// Stateful: owns it, at the level where it belongs.
+@Composable fun SearchScreen(vm: SearchViewModel = viewModel()) {
+    val query by vm.query.collectAsStateWithLifecycle()
+    SearchBar(query, vm::onQueryChanged)
+}
+```
+
+Hoist state to the lowest common ancestor of everything that needs it — and no higher, because hoisting too far means every change recomposes a larger subtree. State that must survive process death, or that outlives the composable, belongs in a `ViewModel` (ch. 5).
+
+`collectAsStateWithLifecycle` rather than `collectAsState`: it applies chapter 5's `repeatOnLifecycle`, so collection stops when the screen is not visible.
+
+## Side effects, precisely
+
+The rule that generates all of these: **composition must be pure and restartable.** It may run many times, in any order, and be abandoned halfway. So anything with an effect on the outside world goes in an effect API, not in the function body.
+
+```kotlin
+// Wrong: runs on every recomposition, possibly dozens of times.
+@Composable fun Screen(id: String) {
+    analytics.screenView(id)
+    ...
+}
+```
+
+| API | Runs | For |
+|---|---|---|
+| `LaunchedEffect(key)` | a coroutine, on entry and when `key` changes | loading, snackbars, one-shot work |
+| `DisposableEffect(key)` | with a cleanup block | registering and unregistering a listener |
+| `SideEffect` | after every successful composition | publishing state to a non-Compose object |
+| `rememberCoroutineScope()` | a scope tied to the call site | starting work from a *callback*, not from composition |
+| `produceState` | a coroutine producing a `State` | converting a non-Compose source into state |
+| `rememberUpdatedState` | — | capturing the latest value inside a long-lived effect |
+
+The **keys** are the whole API. `LaunchedEffect(Unit)` runs once and never restarts; `LaunchedEffect(id)` cancels and restarts when `id` changes — which is almost always what you want when loading data for an id.
+
+`rememberUpdatedState` solves a specific trap: an effect that must not restart but must see the current value.
+
+```kotlin
+@Composable fun AutoDismiss(onDismiss: () -> Unit) {
+    val current by rememberUpdatedState(onDismiss)
+    LaunchedEffect(Unit) {                 // deliberately does not restart
+        delay(5_000)
+        current()                          // ...but calls the LATEST callback
+    }
+}
+```
+
+Without it, the effect captures the first `onDismiss` and calls a stale lambda five seconds later.
+
+## The three phases
+
+Composition is only the first of three, and knowing which phase a value is read in is the highest-leverage performance idea in Compose.
+
+<Diagram
+  caption="Three phases, and the phase a state is read in decides how much work a change costs. A deferred read skips the phases above it entirely."
+  label="Diagram of the three Compose phases: composition decides what to show, layout decides where and how big, drawing paints. Reading a rapidly changing state in composition re-runs all three phases, while a deferred lambda read in layout or drawing skips the earlier ones."
+>
+  <svg viewBox="0 0 660 252" width="660" height="252">
+    <rect x="20" y="30" width="180" height="58" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="110" y="52" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">COMPOSITION</text>
+    <text x="110" y="70" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">what to show</text>
+
+    <rect x="240" y="30" width="180" height="58" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="330" y="52" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">LAYOUT</text>
+    <text x="330" y="70" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">where, and how big</text>
+
+    <rect x="460" y="30" width="180" height="58" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="550" y="52" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">DRAWING</text>
+    <text x="550" y="70" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">paint it</text>
+
+    <path d="M200 59h40M420 59h40" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M232 53 L240 59 L232 65M452 53 L460 59 L452 65" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <rect x="20" y="112" width="620" height="44" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="34" y="131" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">Modifier.offset(scroll.dp)</text>
+    <text x="34" y="147" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">reads the scroll state in COMPOSITION — so every pixel of scroll re-runs all three phases</text>
+
+    <rect x="20" y="168" width="620" height="44" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="34" y="187" font-family="var(--font-mono)" font-size="11" fill="var(--dg-ok)">Modifier.offset &#123; IntOffset(0, scroll) &#125;</text>
+    <text x="34" y="203" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">the lambda is read in LAYOUT — composition is skipped entirely, and nothing recomposes</text>
+
+    <text x="330" y="238" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">same visual result, an order of magnitude apart in cost.</text>
+  </svg>
+</Diagram>
+
+The lambda-taking overloads of `offset`, `graphicsLayer` and friends exist entirely for this. Passing a value reads it during composition; passing a lambda defers the read to the phase that needs it, so a rapidly changing value — scroll offset, an animation — never invalidates composition at all.
+
+**Reading scroll state in composition is the classic list-killer:** `if (listState.firstVisibleItemIndex > 0)` in a composable recomposes on every scroll pixel. `derivedStateOf` (above) fixes it by narrowing what counts as a change.
+
+## Layout
+
+Compose's layout contract is stricter than the View system's, and the strictness is the feature: **children are measured exactly once**. That removes chapter 8's exponent by construction.
+
+```kotlin
+@Composable
+fun TwoColumn(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Layout(content, modifier) { measurables, constraints ->
+        val half = constraints.maxWidth / 2
+        val placeables = measurables.map { it.measure(constraints.copy(maxWidth = half)) }
+        layout(constraints.maxWidth, placeables.maxOf { it.height }) {
+            var x = 0
+            placeables.forEach { it.place(x, 0); x += half }
+        }
+    }
+}
+```
+
+Measure each child once, then `layout(width, height)` and place. `Modifier.layout` does the same for a single element.
+
+**Intrinsics** are the escape hatch when a parent genuinely needs a child's size before measuring — `IntrinsicSize.Min` asks "how narrow could you be". It costs an extra measurement pass, so use it deliberately.
+
+**`SubcomposeLayout`** defers composing some children until measurement, which is what makes `LazyColumn` possible: only visible items are composed. It is expensive; `BoxWithConstraints` is built on it, which is why sprinkling `BoxWithConstraints` everywhere is a performance mistake rather than a convenience.
+
+## Modifiers
+
+A `Modifier` is an ordered, immutable chain of elements — a linked list — applied outside-in.
+
+**Order matters, and it is not cosmetic:**
+
+```kotlin
+Modifier.padding(16.dp).background(Blue)   // padding is OUTSIDE the blue
+Modifier.background(Blue).padding(16.dp)   // blue extends behind the padding
+```
+
+Each modifier wraps the rest, so `padding` first means the background is applied to the already-inset area. The same logic makes `clickable` before `padding` produce a smaller touch target than after.
+
+**`Modifier.Node`** is the current API for custom modifiers: a long-lived object the runtime can update in place rather than recreating each composition. **`composed { }`** is the old way and is discouraged precisely because it defeats that — it forces a per-instance composition and blocks the compiler from hoisting the modifier out.
+
+Passing `modifier` as the first optional parameter, defaulting to `Modifier`, is the convention that lets callers position your composable without you anticipating how.
+
+## Lazy layouts
+
+`LazyColumn`, `LazyRow`, `LazyVerticalGrid` and the staggered variants compose only what is visible, using `SubcomposeLayout` above.
+
+```kotlin
+LazyColumn(state = listState) {
+    items(articles, key = { it.id }, contentType = { it.kind }) { ArticleRow(it) }
+}
+```
+
+**`key`** gives items identity across insertions (as `key()` above). Without it, inserting at the top invalidates everything below. **`contentType`** partitions the reuse pool so a header is not reused as a row — chapter 8's view type.
+
+**Pitfalls that produce real bugs:** nesting a scrollable inside another on the same axis throws, because the inner one would receive infinite constraints — use one lazy layout with several item types. Giving a lazy layout unbounded height (inside a `Column` with `verticalScroll`) defeats laziness entirely, composing every item. `animateItem` gives move and fade animations, and needs `key` to know what moved.
+
+## Text, graphics &amp; gestures
+
+**Text measurement is expensive** — layout, line breaking, shaping. `AnnotatedString` builds styled text without nesting composables. Where the same text is measured repeatedly, `TextMeasurer` with caching helps.
+
+**`Canvas`** gives an imperative drawing scope; the lambda runs in the drawing phase, so reading state inside it skips composition and layout. **`graphicsLayer`** maps directly onto chapter 8's RenderNode properties, which is why animating alpha or scale through it is nearly free.
+
+**`pointerInput`** is the gesture entry point. Its keys behave like `LaunchedEffect`'s — the block restarts when they change, so capturing a stale value is the same trap:
+
+```kotlin
+Modifier.pointerInput(itemId) { detectTapGestures { onTap(itemId) } }
+```
+
+`NestedScrollConnection` lets a parent intercept scroll deltas before or after a child — a collapsing toolbar, or interop with a View scroller (ch. 8).
+
+## CompositionLocal
+
+Implicit dependency injection down the UI tree: a value provided high up, read anywhere below, without threading it through every parameter.
+
+```kotlin
+CompositionLocalProvider(LocalSpacing provides spacing) { App() }
+```
+
+It is right for things that are genuinely ambient and needed almost everywhere: theme, density, insets, the layout direction. It is **wrong** for a dependency that a specific composable needs, because it makes that dependency invisible at the call site, untestable without a provider, and a runtime crash rather than a compile error when missing.
+
+The test: could a reader of this composable's signature tell what it depends on? If the answer matters, make it a parameter. Chapter 14 makes the same argument about DI generally.
+
+## Performance
+
+In the order worth attempting.
+
+1. **Read the metrics report**, not your instincts. It names unstable parameters and unskippable composables.
+2. **Fix stability** — `val`s, stable types, a persistent list where a `List` is a parameter.
+3. **Defer reads** — lambda-taking modifier overloads for anything that changes rapidly, `derivedStateOf` to coarsen.
+4. **Key your lazy items.**
+5. **Avoid backwards writes** — writing a state during composition that was already read in the same pass. The runtime detects this and recomposes again, sometimes forever.
+6. **`movableContentOf`** to move a subtree between parents without losing its state — a detail pane that becomes a dialog.
+
+Measure with **Layout Inspector's recomposition counts** for the interactive answer, and **Macrobenchmark** for the number you can put in CI (ch. 11). Compose tracing works in release builds, which matters because debug Compose is unrepresentatively slow — a fact that has misled a great many people into "optimising" a problem that does not exist in release.
+
+## Testing &amp; tooling
+
+Compose tests query the **semantics tree**, not the visual output — the same tree accessibility services use (ch. 19), so testable and accessible are the same property here.
+
+```kotlin
+@Test fun showsErrorAndRetries() {
+    composeTestRule.setContent { SearchScreen(fakeViewModel) }
+    composeTestRule.onNodeWithText("Try again").performClick()
+    composeTestRule.onNodeWithTag("results").assertIsDisplayed()
+}
+```
+
+The test rule **auto-syncs**: it waits for composition and animation to settle before each assertion, which removes most of Espresso's flakiness (ch. 18). Where something never settles — an infinite animation — disable auto-sync and drive the clock manually.
+
+`@Preview` renders a composable without a device, and variants (`fontScale`, `uiMode`, `locale`, `widthDp`) are the cheapest way to see chapter 19's matrix. Layout Inspector shows the live tree, recomposition counts and skip counts.
+
+## Failure modes: Jetpack Compose
+
+**A list drops frames while scrolling, and the metrics report says a parameter is unstable.** *Symptom:* recomposition counts climbing on every item during scroll. *Cause:* a `List` or a `var` in the item's parameters. *Fix:* stable types; `PersistentList`; `key` on items.
+
+**Every pixel of scroll recomposes half the screen.** *Symptom:* a header or button recomposing continuously. *Cause:* reading `firstVisibleItemIndex` or a scroll offset in composition. *Fix:* `derivedStateOf`, or the lambda overload of `offset`.
+
+**A callback fires with a stale value after a delay.** *Symptom:* an auto-dismiss or timeout uses the value from when the screen opened. *Cause:* a long-lived `LaunchedEffect` captured the first lambda. *Fix:* `rememberUpdatedState`.
+
+**An effect runs on every recomposition.** *Symptom:* duplicate analytics events, repeated network calls. *Cause:* a side effect in the composable body, or `LaunchedEffect` keyed on something that changes every pass. *Fix:* move it into an effect with a stable key.
+
+**UI is stale although the data changed.** *Symptom:* the screen does not update until something else forces recomposition. *Cause:* `@Immutable` on a type that mutates, or state held in a plain field rather than a `MutableState`. *Fix:* remove the false promise; use `mutableStateOf`.
+
+**Scroll position is lost on rotation.** *Symptom:* the list jumps to the top. *Cause:* `remember` instead of `rememberSaveable`, or a missing `rememberLazyListState`. *Fix:* the saveable variants (ch. 5).
+
+**Everything is slow in debug and fine in release.** *Symptom:* dreadful performance that disappears when profiling properly. *Cause:* debug Compose is not representative. *Fix:* measure release builds with Macrobenchmark (ch. 11).
+
+## Cheat-sheet: Jetpack Compose
+
+```kotlin
+// state that survives what you need it to (ch. 5 tiers)
+var q by rememberSaveable { mutableStateOf("") }        // process death
+val state = rememberLazyListState()                     // scroll, already saveable
+val vmState by vm.state.collectAsStateWithLifecycle()   // stops collecting when invisible
+
+// defer the read, skip the phases
+Modifier.offset { IntOffset(0, scrollPx) }              // layout, not composition
+val show by remember { derivedStateOf { state.firstVisibleItemIndex > 0 } }
+
+// effects
+LaunchedEffect(id) { load(id) }                          // restarts when id changes
+DisposableEffect(owner) { register(); onDispose { unregister() } }
+val latest by rememberUpdatedState(onDone)               // no restart, current value
+
+// lazy lists
+items(list, key = { it.id }, contentType = { it.kind }) { Row(it) }
+```
+
+```bash
+./gradlew assembleRelease -Pandroid.enableComposeCompilerReports=true \
+  -Pandroid.enableComposeCompilerMetrics=true    # the ground truth on stability
+```
+
+| Symptom | First thing to check |
+|---|---|
+| recomposes too much | the metrics report, for unstable parameters |
+| scroll is janky | a state read in composition; missing `key` |
+| stale UI | a false `@Immutable`, or state not in `MutableState` |
+| duplicate side effects | an effect key that changes every pass |
+| lost state on rotation | `remember` where `rememberSaveable` was needed |
+
+<LabCard module=":ch08-compose">
+Implement a custom `Layout`, a custom `Modifier.Node`, and a `LazyColumn` of ten thousand items. Then do the part that matters: use the compiler metrics report and Layout Inspector to drive recompositions of the list item to **zero** while scrolling. Record what each fix was worth — stability, then keys, then deferred reads — so you finish with an ordered list of what actually pays, rather than a habit of applying all three everywhere.
+</LabCard>

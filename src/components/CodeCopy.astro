@@ -1,0 +1,100 @@
+---
+/**
+ * Adds a copy-to-clipboard button to every fenced code block in the reading
+ * column, at runtime. Nothing about MDX or the chapter components needs to
+ * know this exists — it walks `.prose pre` (which covers plain fences,
+ * <Snippet>, and <CodeTabs> alike, since all three render inside `.prose`)
+ * and wraps each block once it hits the DOM.
+ *
+ * Headless: no markup of its own, just the script and its styles.
+ */
+---
+<script>
+  function wireCopyButtons() {
+    const blocks = document.querySelectorAll<HTMLPreElement>('.prose pre');
+
+    blocks.forEach((pre) => {
+      if (pre.parentElement?.classList.contains('code-copy')) return;
+      const code = pre.textContent ?? '';
+      if (!code.trim()) return;
+
+      const wrapper = document.createElement('div');
+      wrapper.className = 'code-copy';
+      pre.replaceWith(wrapper);
+      wrapper.appendChild(pre);
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'code-copy-btn';
+      button.setAttribute('aria-label', 'Copy code');
+      button.innerHTML = `
+        <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+      `;
+
+      let resetTimer: ReturnType<typeof setTimeout>;
+      button.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(code);
+        } catch {
+          const textarea = document.createElement('textarea');
+          textarea.value = code;
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          try { document.execCommand('copy'); } catch {}
+          textarea.remove();
+        }
+        button.classList.add('is-copied');
+        button.setAttribute('aria-label', 'Copied');
+        clearTimeout(resetTimer);
+        resetTimer = setTimeout(() => {
+          button.classList.remove('is-copied');
+          button.setAttribute('aria-label', 'Copy code');
+        }, 1600);
+      });
+
+      wrapper.appendChild(button);
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wireCopyButtons);
+  } else {
+    wireCopyButtons();
+  }
+</script>
+
+<style is:global>
+  .code-copy { position: relative; }
+  .code-copy pre { margin: 0; }
+
+  .code-copy-btn {
+    align-items: center;
+    background: var(--code-surface);
+    border: 1px solid var(--code-line);
+    border-radius: var(--radius-sm);
+    color: var(--code-ink-2);
+    cursor: pointer;
+    display: inline-flex;
+    height: 1.75rem;
+    justify-content: center;
+    opacity: 0.7;
+    padding: 0;
+    position: absolute;
+    right: var(--space-3);
+    top: var(--space-3);
+    transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    width: 1.75rem;
+  }
+  .code-copy-btn:hover { color: var(--code-ink); }
+  .code-copy-btn:hover, .code-copy-btn:focus-visible, .code-copy-btn.is-copied { opacity: 1; }
+  .code-copy-btn:focus-visible { box-shadow: 0 0 0 2px var(--accent); outline: none; }
+
+  .code-copy-btn svg { height: 0.9rem; width: 0.9rem; }
+  .code-copy-btn .icon-check { display: none; }
+  .code-copy-btn.is-copied { border-color: var(--syn-string); color: var(--syn-string); }
+  .code-copy-btn.is-copied .icon-copy { display: none; }
+  .code-copy-btn.is-copied .icon-check { display: inline-flex; }
+</style>

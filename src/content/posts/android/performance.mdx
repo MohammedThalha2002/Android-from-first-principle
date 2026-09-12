@@ -1,0 +1,375 @@
+---
+title: "Performance"
+navTitle: "Performance"
+summary: "A metric, a tool and a regression gate for startup, frames, memory and battery. Never \"it feels smoother\"."
+readingTime: "2 hours"
+minutes: 125
+tags: ["ttid","ttfd","cold start","baseline profile","startup profile","macrobenchmark","frametimingmetric","jankstats","perfetto","leakcanary","heap dump","dominator tree","r8 full mode","resource shrinking","apk size","wakelock","strictmode","regression gate"]
+draft: true
+date: "2026-06-13"
+subtopic: "android-internals"
+subtopicOrder: 11
+part: "II"
+verifiedAgainst: "Benchmark 1.4 · AGP 8.13 · compileSdk 36"
+stage: "outline"
+labModule: ":ch11-performance"
+sources: ["05-main-thread-coroutines-and-flow#ANR","16-paging-lists-images-and-media#Bitmap arithmetic","16-paging-lists-images-and-media#Image loading libraries","21-performance-engineering#Define the metrics first","21-performance-engineering#Startup","21-performance-engineering#Rendering &amp; jank","21-performance-engineering#Memory","21-performance-engineering#App size","21-performance-engineering#Battery &amp; network","21-performance-engineering#Threading costs","21-performance-engineering#Build a performance culture","21-performance-engineering#Failure modes","21-performance-engineering#Cheat-sheet"]
+---
+"It feels smoother" is not a claim anyone can verify, act on, or defend in six months when it feels slow again.
+
+This chapter replaces that with numbers. Every section has a **metric**, a **tool** that produces it, and a **gate** that stops it regressing. The gate is the part that matters: a one-off optimisation decays, because the next twenty commits each add a millisecond and nobody notices until it is a second.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## ANR
+
+When the main thread is blocked long enough, the system decides your app is not responding and offers to kill it.
+
+The watchdog is in `system_server` (ch. 2), and the timeouts differ by what is waiting:
+
+| Trigger | Budget |
+|---|---|
+| Input event not handled | ~5 s |
+| `BroadcastReceiver.onReceive` not returning | 10 s foreground, 60 s background |
+| Service not starting | 20 s foreground, 200 s background |
+| `ContentProvider` not responding | 10 s |
+
+An ANR trace is written to `/data/anr/traces.txt` and surfaced in Play Console. **Read the main thread's stack first** — the top frame is what was blocking. Three shapes recur:
+
+- **Your own slow work** — file or network I/O on the main thread. `StrictMode` catches this in debug.
+- **A Binder call** — the top frame is `android.os.BinderProxy.transactNative`. You are blocked on *another* process (ch. 2), and your code may be entirely reasonable.
+- **Lock contention** — the main thread is waiting on a monitor another thread holds. The trace shows both; find the holder.
+
+`SharedPreferences` deserves its own mention because it produces ANRs that look like nothing. The first read loads and parses the whole file synchronously, and `apply()` — despite being the "async" one — enqueues an fsync that `onPause` and `onStop` **wait for**. Chapter 15 replaces it with DataStore for exactly this reason.
+
+## Bitmap arithmetic
+
+The most useful sum in this chapter, and it explains most `OutOfMemoryError`s in the wild.
+
+```
+bytes = width × height × bytes-per-pixel
+```
+
+A 12-megapixel photo (4000 × 3000) in `ARGB_8888` — four bytes per pixel:
+
+```
+4000 × 3000 × 4 = 48,000,000 bytes ≈ 48 MB
+```
+
+Forty-eight megabytes for **one image**, on a heap that may be 128–256 MB. Three of them is a crash. And the file on disk was perhaps 3 MB — JPEG compression means file size tells you nothing about decoded size.
+
+**Downsample at decode time.** Never decode full size and scale afterwards; the peak allocation is what kills you:
+
+```kotlin
+val source = ImageDecoder.createSource(contentResolver, uri)
+val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+    decoder.setTargetSize(viewWidth, viewHeight)     // decoded at the size you need
+}
+```
+
+The older `BitmapFactory.Options.inSampleSize` does the same by powers of two.
+
+**`Bitmap.Config`** trades memory for quality: `ARGB_8888` is four bytes per pixel; `RGB_565` is two, which halves memory at the cost of gradient banding and no alpha. `HARDWARE` keeps the bitmap in graphics memory rather than the Java heap — cheapest for display, but the pixels cannot be read back, so it is wrong for anything you need to process.
+
+## Image loading libraries
+
+Coil (Kotlin-first, coroutines) and Glide solve the same problem, and knowing the architecture is what lets you diagnose it.
+
+```kotlin
+AsyncImage(
+    model = article.imageUrl,
+    contentDescription = null,          // decorative — say so explicitly (ch. 19)
+    modifier = Modifier.aspectRatio(16f / 9f),   // reserve the space: stable item size
+)
+```
+
+Underneath: a **memory cache** keyed by URL *and requested size*, a **disk cache** for bytes, size resolution from the target view, and cancellation tied to the composable or view lifecycle so a scrolled-past request stops.
+
+**Diagnosing a cache-miss storm** — every scroll re-downloading — comes down to three causes:
+
+1. **The request key changes.** A URL with a cache-busting timestamp, or a new `ImageRequest` built per recomposition, produces a fresh key each time.
+2. **The size changes.** Cache entries are per resolved size; a view whose size is not stable during layout produces several entries for one image.
+3. **The disk cache is too small** for the working set, so entries are evicted before reuse.
+
+Coil's logger and disk-cache statistics answer which one it is in minutes.
+
+## Define the metrics first
+
+You cannot improve what you have not defined. These are the ones worth tracking, with the thresholds that separate acceptable from not.
+
+| Metric | What it is | Watch |
+|---|---|---|
+| **TTID** | time to *initial* display — first frame drawn | cold start under ~500 ms |
+| **TTFD** | time to *fully* drawn — your real content, reported by you | the number users feel |
+| Frame timing p50/p90/p99 | per-frame duration | p90 inside the budget (ch. 12) |
+| Jank rate | frames over budget | under 1 % |
+| ANR rate | Play Console vitals | under 0.47 % — the bad-behaviour threshold |
+| Crash-free users | Play Console / Crashlytics | your SLO (ch. 20) |
+| Memory | PSS / RSS | no growth across navigation |
+| Download size | what Play reports | directly affects install conversion |
+| Battery | wakeups, partial wakelocks | Play Console flags outliers |
+
+**Play Console already tracks several of these** across your real install base — ANR rate, crash rate, excessive wakeups, startup times. That is free field data from devices you do not own, and it should be the first place you look, not the last.
+
+**TTID versus TTFD** is the distinction most teams miss. TTID is the first frame — often a skeleton or an empty list, which the framework can measure. TTFD is when your actual content is there, which only you can know:
+
+```kotlin
+override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    setContent { Feed(state) }
+    lifecycleScope.launch {
+        viewModel.state.first { it is Content }
+        reportFullyDrawn()          // now the number means something
+    }
+}
+```
+
+Optimising TTID alone produces an app that shows an empty screen very quickly.
+
+## Startup
+
+The timeline is chapter 2's, now with measurements attached.
+
+```
+process fork (Zygote)  →  Application init  →  Activity onCreate  →  first frame  →  fully drawn
+        free              ← YOUR COST →                                  TTID           TTFD
+```
+
+**Content providers initialised at startup** are the hidden cost. Every provider in the merged manifest runs before `Application.onCreate` (ch. 2, ch. 6), so a library you never call can cost hundreds of milliseconds. Find them:
+
+<Diagram
+  caption="The startup timeline, with the boundary between what the platform gives you and what you pay for. TTID is the first frame; TTFD is the moment your real content is there, and only you can report it."
+  label="Startup timeline: the Zygote fork and runtime setup are effectively free, then content providers from every library initialise, then Application onCreate, the Activity, and the first frame which is time to initial display. Time to full display comes later when real content is on screen and must be reported by the app."
+>
+  <svg viewBox="0 0 660 244" width="660" height="244">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">FREE — ALREADY DONE</text>
+    <rect x="12" y="26" width="128" height="44" rx="7" fill="var(--dg-fill)" stroke="var(--dg-ok)"/>
+    <text x="76" y="46" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">Zygote fork</text>
+    <text x="76" y="61" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">runtime preloaded</text>
+
+    <text x="160" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">YOUR COST STARTS HERE</text>
+    <rect x="156" y="26" width="136" height="44" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="224" y="46" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">ContentProviders</text>
+    <text x="224" y="61" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">every library, before you</text>
+
+    <rect x="308" y="26" width="120" height="44" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="368" y="46" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">Application</text>
+    <text x="368" y="61" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">onCreate</text>
+
+    <rect x="444" y="26" width="100" height="44" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="494" y="52" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">Activity</text>
+
+    <rect x="560" y="26" width="88" height="44" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="604" y="46" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-accent)">first frame</text>
+    <text x="604" y="61" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">skeleton</text>
+
+    <path d="M140 48h16M292 48h16M428 48h16M544 48h16" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <path d="M156 90 L604 90" fill="none" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <path d="M156 84 L156 96M604 84 L604 96" fill="none" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="380" y="108" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">TTID — time to initial display</text>
+
+    <rect x="480" y="130" width="168" height="40" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="564" y="147" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">real content on screen</text>
+    <text x="564" y="162" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">reportFullyDrawn()</text>
+    <path d="M156 190 L648 190" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M156 184 L156 196M648 184 L648 196" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="380" y="208" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-ok)">TTFD — the number a user actually feels</text>
+    <path d="M604 70 L604 130" fill="none" stroke="var(--dg-muted)" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+    <text x="330" y="236" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">Optimise TTID alone and you ship an app that shows an empty screen very quickly.</text>
+  </svg>
+</Diagram>
+
+```bash
+apkanalyzer manifest print app-release.apk | grep -A3 provider
+```
+
+**The App Startup library** collapses many library providers into one, and gives you explicit ordering and lazy initialisation.
+
+**Defer everything you can.** Analytics, crash reporting beyond the handler, image-loader warm-up, feature-flag fetches — none of these need to complete before the first frame. Initialise them after, or lazily on first use (`by lazy`, ch. 12).
+
+**The splash screen API is not a delay.** `SplashScreen` shows the system splash and lets you *hold* it while genuinely-needed work completes. Using it to display branding for a fixed duration is adding time to your own startup metric.
+
+**Baseline Profiles** are the single highest-leverage startup fix, and knowing what they *are* removes the magic: a list of methods, shipped with your app, that ART compiles ahead of time (ch. 2) instead of interpreting and JIT-compiling on first run. **Startup Profiles** additionally reorder the DEX so startup code sits together, reducing page faults.
+
+```kotlin
+@Test fun generate() = baselineProfileRule.collect(packageName = "dev.firstprinciples.android") {
+    pressHome(); startActivityAndWait()
+    // exercise the critical path: the first screen and the first scroll
+}
+```
+
+Typical gains are 20–30 % on cold start and a visible reduction in first-scroll jank (ch. 8's shader compilation). Generate it in CI so it does not rot.
+
+**Measure with `am start -W` for a quick number and Macrobenchmark for a trustworthy one:**
+
+```kotlin
+@Test fun startup() = benchmarkRule.measureRepeated(
+    packageName = "dev.firstprinciples.android",
+    metrics = listOf(StartupTimingMetric()),
+    iterations = 10,
+    startupMode = StartupMode.COLD,
+    compilationMode = CompilationMode.Partial(),   // with the Baseline Profile applied
+) { pressHome(); startActivityAndWait() }
+```
+
+## Rendering &amp; jank
+
+Chapter 8 explained the pipeline; here are the tools that quantify it.
+
+**Macrobenchmark `FrameTimingMetric`** gives p50/p90/p99 frame durations for a scripted interaction — the number to gate on.
+
+**JankStats** reports from the field, attributing jank to a screen or state you name. That matters because your device matrix is not your users'.
+
+**Perfetto** is the deep tool. Record a trace, find a long frame, and read its slices to see which stage ran long — and, crucially, whether the main thread or the RenderThread was the bottleneck. **Custom trace sections** make your own code visible:
+
+```kotlin
+trace("FeedViewModel.mapToUiState") { /* ... */ }
+```
+
+**Compose recomposition counts** in Layout Inspector, and the compiler metrics report (ch. 13), for the Compose-specific causes.
+
+**Profile a release build on a mid-range device.** Debug Compose is unrepresentatively slow, and a flagship absorbs problems your users cannot.
+
+## Memory
+
+The heap is small and the killer is impatient (ch. 9).
+
+**Leaks first**, because they are the highest-value and easiest to find. **LeakCanary** in debug catches the classic classes:
+
+- an Activity or Fragment retained after destruction (ch. 5)
+- a listener registered and never removed
+- a `Context` captured in a singleton (ch. 14)
+- a coroutine scope that outlives its owner (ch. 12)
+- a Fragment's view binding not nulled in `onDestroyView` (ch. 8)
+
+**Heap dumps and dominator trees** answer "what is holding this alive". The dominator tree shows the object whose removal would free the most, which is usually the actual bug rather than the biggest object.
+
+**Bitmaps and native memory** often dominate (ch. 17). `dumpsys meminfo` breaks memory down by category, and graphics memory does not appear in the Java heap at all — a common source of "the heap looks fine but we are being killed".
+
+**Memory pressure callbacks** — `onTrimMemory` — tell you the system is under pressure. Dropping caches there is genuinely worth doing.
+
+**`largeHeap` is an admission of defeat.** It requests a bigger heap and makes GC pauses longer, delaying the problem while making each pause worse. Almost always the real fix is a bitmap decoded at full size (ch. 17) or a leak.
+
+## App size
+
+Download size is a business metric: install conversion drops measurably as size rises, and in markets with metered data the effect is severe.
+
+**R8 in full mode** shrinks, optimises and obfuscates (ch. 2). Enable it, and **write the minimum keep rules** — a broad `-keep class com.yourapp.**` disables tree-shaking for your whole app. Keep only what is reached reflectively, and prefer compile-time alternatives so you need fewer rules (ch. 16).
+
+**Resource shrinking** removes unused resources; `shrinkResources true` alongside `minifyEnabled true`.
+
+**AAB splits** (ch. 2) are the largest single win: users download one ABI and one density, not all of them. **Dynamic feature modules** defer rarely-used features to on-demand download.
+
+**Vector over raster** where possible; a vector is one small file instead of five PNGs.
+
+**Track size in CI** and fail on a regression over a threshold:
+
+```bash
+apkanalyzer apk file-size app-release.apk
+apkanalyzer apk compare old.apk new.apk    # exactly what grew
+```
+
+## Battery &amp; network
+
+Battery problems are invisible in development — you are plugged in — and very visible to users.
+
+**Wakelocks** keep the CPU awake. A partial wakelock never released is the worst battery bug you can ship, and Play Console flags it as excessive.
+
+**Wakeup frequency** from alarms and jobs (ch. 9). Each wakeup costs more than the work, because it brings the device out of a low-power state.
+
+**Radio tail energy** (ch. 16): batch requests, and let WorkManager constraints coalesce your work with other apps'.
+
+**Battery Historian** visualises a `bugreport`, and **Play Console vitals** reports excessive wakeups and partial wakelocks across your real install base.
+
+```bash
+adb shell dumpsys batterystats --reset
+# ... use the app ...
+adb bugreport bugreport.zip        # then load in Battery Historian
+```
+
+## Threading costs
+
+**`StrictMode` in debug** catches main-thread disk and network access, and leaked closeables, at the moment they happen rather than as a mysterious ANR later:
+
+```kotlin
+if (BuildConfig.DEBUG) {
+    StrictMode.setThreadPolicy(StrictMode.ThreadPolicy.Builder()
+        .detectDiskReads().detectDiskWrites().detectNetwork()
+        .penaltyLog().build())
+    StrictMode.setVmPolicy(StrictMode.VmPolicy.Builder()
+        .detectLeakedClosableObjects().detectActivityLeaks()
+        .penaltyLog().build())
+}
+```
+
+**Lock contention** shows in an ANR trace as the main thread waiting on a monitor (ch. 12).
+
+**Over-parallelisation** is real on a big.LITTLE phone: launching sixteen coroutines on `Dispatchers.Default` on a four-core device adds context switching, and work may land on the little cores anyway. Parallelise where there is measurable gain.
+
+## Build a performance culture
+
+The section that makes the rest durable.
+
+**A benchmark module in CI**, running Macrobenchmark on a Gradle Managed Device so the hardware is consistent.
+
+**Compare against a baseline commit** rather than an absolute number — absolute values vary by machine; deltas do not.
+
+**Fail the PR on regression**, with a threshold that allows noise but not drift. This is the whole point: without a gate, performance decays by a millisecond per commit.
+
+**A dashboard** of field metrics — Play Console vitals plus JankStats — because CI measures one device and users have thousands.
+
+**Profile a release build on a low-end device.** Stated three times in this chapter because it is the discipline most often skipped, and skipping it invalidates everything else.
+
+## Failure modes: Performance
+
+**Startup regressed and no code changed.** *Symptom:* TTID up after a dependency bump. *Cause:* a new library's `ContentProvider` initialising before `Application.onCreate`. *Fix:* check the merged manifest; App Startup.
+
+**The first run is slow, later runs are fine.** *Symptom:* poor first-impression performance. *Cause:* no Baseline Profile — interpreted and JIT-compiled on first run (ch. 2). *Fix:* generate one in CI.
+
+**Release crashes with `ClassNotFoundException`, debug is fine.** *Symptom:* only after minification. *Cause:* R8 removed something reached reflectively. *Fix:* a narrow keep rule; better, a compile-time alternative.
+
+**`OutOfMemoryError` with a healthy-looking heap.** *Symptom:* OOM while the Java heap has room. *Cause:* bitmap or native memory, which is not in the Java heap (ch. 17). *Fix:* `dumpsys meminfo`; decode at target size.
+
+**Memory grows with every navigation.** *Symptom:* a slow climb, eventual kill. *Cause:* a leak — usually a retained Activity or an unremoved listener. *Fix:* LeakCanary, then the dominator tree.
+
+**Play Console flags excessive wakeups.** *Symptom:* a vitals warning and battery complaints. *Cause:* frequent alarms or jobs, or an unreleased wakelock. *Fix:* WorkManager with constraints (ch. 9); audit wakelocks.
+
+**Everything is fast on the test device and slow in reviews.** *Symptom:* good metrics, bad feedback. *Cause:* measuring a debug build on a flagship. *Fix:* release build, mid-range device, field metrics.
+
+## Cheat-sheet: Performance
+
+```bash
+# startup
+adb shell am start -W -n <pkg>/.MainActivity      # TotalTime, LaunchState
+adb shell am force-stop <pkg>                     # guarantee the next start is cold
+
+# frames (ch. 8)
+adb shell dumpsys gfxinfo <pkg> framestats
+
+# memory
+adb shell dumpsys meminfo <pkg>                   # note the Graphics line
+adb shell am dumpheap <pid> /data/local/tmp/h.hprof
+
+# size
+apkanalyzer apk compare old.apk new.apk
+
+# battery
+adb shell dumpsys batterystats --reset ; adb bugreport out.zip
+```
+
+| Metric | Tool | Gate |
+|---|---|---|
+| cold start | Macrobenchmark `StartupTimingMetric` | fail PR on regression vs baseline |
+| frame timing | Macrobenchmark `FrameTimingMetric` | p90 inside budget |
+| jank in the field | JankStats | under 1 % |
+| size | `apkanalyzer apk compare` | threshold per release |
+| leaks | LeakCanary | zero in debug runs |
+| main-thread I/O | StrictMode | zero violations |
+
+<LabCard module=":ch21-performance">
+Take a deliberately slow app and cut cold start by 40 % while driving scroll jank under 1 %. Produce Macrobenchmark output before and after for both. Then add the part that makes it last: a CI gate that fails a PR when either regresses against a baseline commit. Without the gate you have optimised once; with it you have made performance a property of the codebase.
+</LabCard>

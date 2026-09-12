@@ -1,0 +1,389 @@
+---
+title: "User space, kernel space, and the only door between them"
+motto: "Your code cannot touch anything. It can only ask, and every ask is checked."
+course: android-internals
+chapter: 1
+lesson: 5
+type: mechanism
+minutes: 25
+prerequisites: ["1.1", "1.2"]
+objectives:
+  - "Say what user space and kernel space are, and which one your code runs in"
+  - "Explain what a system call is and why it is the only way out of your process"
+  - "Say who the kernel thinks your app is, and what it checks"
+  - "Explain the Android sandbox in terms of a user id and the kernel"
+  - "Say where Binder sits and why talking to another process is a system call"
+terms: ["user space", "kernel space", "system call", "UID"]
+verifiedOn: "documentation checked; device transcripts still to capture"
+stage: published
+---
+
+## You will
+
+- Say what user space and kernel space are, and which one your code runs in
+- Explain what a system call is and why it is the only way out of your process
+- Say who the kernel thinks your app is, and what it checks
+- Explain the Android sandbox in terms of a user id and the kernel
+- Say where Binder sits and why talking to another process is a system call
+
+## The question
+
+Lesson 1.2 said another app's memory has no address in your process. Fine.
+
+But a file is not memory. The camera is not memory. Your app can open both, and
+your code is the thing running on the processor when it does. Nothing physical
+stops the instruction after that from reading whatever it likes.
+
+Ask what keeps an app in line and you get:
+
+> Permissions. Android won't let an app do something it hasn't asked for.
+
+Permissions are real and they are not this. An app with no permissions at all
+still cannot read the storage chip directly, and the permission system is code
+that would have to be running somewhere in order to stop it.
+
+What most developers picture:
+
+```text
+my app
+   ↓
+Android
+   ↓
+the hardware
+```
+
+What is actually there:
+
+```text
+my app, in user space
+   ↓  a system call: the only door
+the kernel, in kernel space
+   ↓  checks who is asking
+does the work, returns the result
+```
+
+Your code never reaches the last line. It never has.
+
+## What is actually happening
+
+### The processor has two modes
+
+This is a hardware feature, older than Android and not invented for it. The CPU
+runs in one of two modes. In **kernel mode** everything is available: every
+instruction, all of memory, the devices. In **user mode** most of that simply
+does not work.
+
+Your app always runs in user mode. Every line of Kotlin you have ever written
+ran in user mode. The part of the system that runs in kernel mode is the
+kernel, and the two worlds are called **user space** and **kernel space**.
+
+### A system call is the only door
+
+To do anything outside its own memory, a process asks. That request is a
+**system call**: a special instruction that switches the processor into kernel
+mode and jumps to an address the kernel chose, never one the caller picks.
+
+Opening a file is a system call. Reading from a socket is a system call.
+Creating a thread, allocating more memory, and ending a process are all system
+calls. There is no second route, which is what makes this enforceable at all.
+
+<Figure src="hero" caption="One process in user space, the single door it can use, and the kernel on the other side deciding whether to do the work." />
+
+### The kernel knows who is asking
+
+Here is where Android's sandbox actually lives.
+
+When the package manager installs your app, it creates a Linux user for it and
+gives it a number: the **user id**, written UID. Your app's processes run as
+that user, and only that user. Install a second app and it gets a different
+one.
+
+Your app's private directory is owned by that user, and grants nothing to
+anyone else. So when a process makes a system call to open a file, the kernel
+compares the user the process is running as with the owner of the file, and
+refuses if they do not match.
+
+That comparison is the sandbox. Not a policy layer, not a check Android added:
+two numbers compared in kernel space, on every access, for every process on the
+phone. The one user it does not refuse is root, which is why a rooted device
+changes every assumption you can make.
+
+### Binder goes through the same door
+
+Talking to another process is not special either. Every call your app makes to
+a system service goes through a driver that lives in the kernel, called Binder,
+and your app reaches it with a system call like any other.
+
+Chapter 4 is about what Binder does once it is in there. What matters now is
+that there is no side entrance: memory, files, devices and other processes are
+all on the far side of the same door.
+
+Think of a bank counter. You cannot walk into the vault; you fill in a slip and
+hand it over, and someone on the other side checks who you are and does it. The
+analogy stops in one place: there is no manager to appeal to, and no second
+counter.
+
+<Check n={1} />
+
+## Connect it to your code
+
+Every ordinary-looking line that touches anything outside your process is a
+system call underneath.
+
+```kotlin
+// data/TokenStore.kt
+File(context.filesDir, "session.json").writeText(json)
+```
+
+That is an open, a write and a close, each one a trip into kernel space and
+back. It is also why file access has a cost that has nothing to do with the
+disk being slow, and why Android ships a tool that complains when you do it on
+the main thread.
+
+> Anything your app does beyond arithmetic on its own memory is a request to
+> the kernel, and every request is checked against the user your app runs as.
+
+Two consequences worth keeping:
+
+| What you might try | What happens |
+|---|---|
+| Reading another app's private file by path | Refused in the kernel. No permission exists that changes it |
+| Encrypting a file in your own directory | Nothing changes against other apps. That file was already unreadable to them |
+
+The second one catches teams out in review. Encryption is worth doing when the
+key is held somewhere the attacker cannot reach, which is a subject for the
+security course. It buys nothing against a threat the kernel already handled.
+
+<Check n={2} />
+
+## See it on your phone (optional)
+
+You can skip this. Nothing later depends on it.
+
+The shell on the device runs as its own user, not as your app. Ask it to list
+your app's private directory.
+
+{/* VERIFY: capture on the verification device before this leaves draft */}
+
+```bash
+adb shell ls /data/data/dev.firstprinciples.android
+```
+
+```console
+ls: /data/data/dev.firstprinciples.android: Permission denied
+```
+
+That refusal came from the kernel comparing two user ids, in the middle of a
+system call, before anything Android wrote had a say.
+
+## When it breaks
+
+**Reading another app's file by path.**
+
+```console
+java.io.FileNotFoundException: /data/data/com.example.other/files/token.json (Permission denied)
+```
+
+There is no permission to request and no flag that changes it. The other app has
+to hand the data over deliberately, through a component built for it.
+
+**Disk access on the main thread, caught by StrictMode.**
+
+```console
+StrictMode policy violation: android.os.strictmode.DiskReadViolation
+```
+
+Worth reading as a reminder rather than a scolding. Every one of those reads
+crossed into kernel space and back while the thread that draws your frames was
+waiting.
+
+<Check n={3} />
+
+## Your notes
+
+```text
+USER SPACE           your app, always
+      ↓  system call: the only door
+KERNEL SPACE         the kernel
+      ↓  checks: which UID is asking?
+                  who owns the file?
+      ↓  allowed
+does the work, returns the result
+
+install an app  →  a Linux user for it
+its files       →  owned by that user
+another app     →  a different user
+      ↓
+Permission denied, in the kernel
+
+Binder is a kernel driver:
+talking to another process is a
+system call too
+```
+
+- The processor has a user mode and a kernel mode. Your code is always in user
+  mode.
+- A system call is the only way out of your process, and the kernel picks where
+  it lands.
+- Installing an app creates a Linux user for it; its files are owned by that
+  user.
+- The sandbox is the kernel comparing those ids on every access.
+- Root is the exception, which is why rooted devices invalidate the model.
+- Binder lives in the kernel, so talking to another process uses the same door.
+
+## Interview questions
+
+Answer out loud first, then open the model answer.
+
+**1. (Easy)** What are user space and kernel space?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Two processor modes, a hardware feature rather than an Android one.
+- In kernel mode all instructions, memory and devices are available.
+- In user mode most of that is unavailable, and app code always runs there.
+- The kernel is the code that runs in the privileged mode.
+
+**A weak answer** describes them as "layers of Android", which loses the fact
+that the separation is enforced by the processor.
+</details>
+
+**2. (Easy)** What is a system call, and why does it exist?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- The instruction a process uses to ask the kernel to do something for it.
+- It switches the processor into kernel mode at an address the kernel chose.
+- It is the only way out of a process, which is what makes checking possible.
+- Opening files, sockets, creating threads and allocating memory all go through
+  it.
+
+**A weak answer** calls it "an API for the OS", which is true and skips the
+mode switch, which is the entire mechanism.
+</details>
+
+**3. (Medium)** Two apps are installed on one phone. Why can one not read the
+other's files?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Each app was given its own Linux user id at install.
+- Each app's directory is owned by its own user and grants nothing to others.
+- Any read is a system call, and the kernel compares the calling user with the
+  owner.
+- It fails in kernel space, before any framework code is involved, so no
+  permission or flag changes it.
+
+**A weak answer** reaches for runtime permissions, which govern shared things
+like contacts and have nothing to do with another app's private directory.
+</details>
+
+**4. (Medium)** A reviewer asks whether encrypting a file in your app's own
+directory adds protection. What do you say?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Against another app, no: that file was already unreadable to it.
+- Against root or someone holding an unlocked device, it depends entirely on
+  where the key is.
+- A key stored beside the file, or compiled into the app, protects nothing.
+- It is worth doing when hardware holds the key and releases it only under a
+  condition such as the user authenticating.
+
+**A weak answer** says encryption is always better, without naming the threat it
+is supposed to stop.
+</details>
+
+**5. (Hard)** Suppose Android let apps run in kernel mode. What would break?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Every app could read and write any memory, including other apps' and the
+  kernel's own.
+- File ownership, permissions and every other check would be advisory, because
+  the code doing the checking could be bypassed.
+- One bad pointer would take down the device rather than one app.
+- The whole security model rests on app code being unable to reach the checking
+  code.
+
+**A weak answer** lists bad outcomes without noticing that the checks
+themselves stop meaning anything, which is the deeper point.
+</details>
+
+**6. (Hard)** Your app calls a system service and gets a result back from
+another process. How many times did it leave user space?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- At least twice: the request goes through a system call into the kernel.
+- Binder is a driver inside the kernel, so the crossing is the same door as a
+  file read.
+- The kernel passes the request to the other process and the reply comes back
+  the same way.
+- Which is why calls to system services are not free, and why chapter 4 cares
+  about how much you send.
+
+**A weak answer** treats a manager object as a local call. It looks local, and
+the whole of chapter 4 exists because it is not.
+</details>
+
+**7. (The one that matters)** Explain the Android sandbox to an interviewer in
+four sentences.
+
+<details>
+<summary>Model answer</summary>
+
+App code always runs in the processor's user mode, so it cannot touch memory,
+files or devices directly; the only way out is a system call, which switches
+into kernel mode at an address the kernel chose. When an app is installed,
+Android creates a Linux user for it and runs all its processes as that user,
+and its private directory is owned by that same user. So when a system call
+asks to open a file, the kernel compares the calling user against the file's
+owner and refuses if they do not match. That makes the sandbox ordinary file
+ownership enforced in kernel space rather than an Android policy, which is why
+only root gets past it.
+</details>
+
+## Words you met
+
+| Term | What people say | What it actually means |
+|---|---|---|
+| User space | "where apps run" | The processor mode app code runs in, where most instructions, memory and all devices are unavailable. |
+| Kernel space | "the OS" | The privileged processor mode the kernel runs in, where everything is available. |
+| System call | "an OS API" | The instruction a process uses to ask the kernel to act for it. It switches modes and lands at an address the kernel chose. |
+| UID | "the app id" | The Linux user id the package manager gave your app at install. Its processes run as that user and its files are owned by it. [App sandbox](https://source.android.com/docs/security/app-sandbox) |
+
+## Go deeper
+
+- [Application sandbox](https://source.android.com/docs/security/app-sandbox): the platform's own account, including the layers this lesson leaves out.
+- [StrictMode](https://developer.android.com/reference/android/os/StrictMode): what it watches for, and why those operations are worth noticing.
+
+**What to skip for now**
+
+- SELinux, a second set of rules on top of file ownership: not in this course.
+- What Binder does once the call is inside the kernel: chapter 4.
+- Runtime permissions, scoped storage and the KeyStore: the security course.
+
+## Where this goes next
+
+Your process has an address space, threads, cores to run them on and one door
+to the outside. The next lesson asks where the process itself came from, and
+the answer uses the page tables from lesson 1.2 in a way you would not expect.

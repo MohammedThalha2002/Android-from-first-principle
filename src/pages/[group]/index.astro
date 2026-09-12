@@ -1,0 +1,192 @@
+---
+/**
+ * Group home: every subtopic under this group — including ones announced but
+ * not yet written — then standalone posts, newest first.
+ */
+import { getCollection } from 'astro:content';
+import { countSections } from '../../lib/sections';
+import Base from '../../layouts/Base.astro';
+import Chip from '../../components/Chip.astro';
+import { groups, getGroup, splitPostId } from '../../data/groups';
+import { subtopicsForGroup, getSubtopic } from '../../data/subtopics';
+import { readingPaths } from '../../data/reading-paths';
+import { courseHref } from '../../lib/courses';
+
+export async function getStaticPaths() {
+  const all = await getCollection('posts');
+  const ids = new Set(groups.map((group) => group.id));
+  for (const post of all) {
+    const { group } = splitPostId(post.id);
+    if (group) ids.add(group);
+  }
+  return [...ids].map((id) => ({ params: { group: id } }));
+}
+
+const { group: groupId } = Astro.params as { group: string };
+const group = getGroup(groupId);
+
+// Courses come first: they are the written-for-reading version of everything
+// under them. The subtopics below are the older long-form posts.
+const allLessons = await getCollection('lessons');
+const courses = (await getCollection('courses'))
+  .filter((course) => course.data.group === groupId)
+  .map((course) => ({
+    course,
+    lessons: allLessons.filter((lesson) => lesson.id.startsWith(`${course.id}/`)),
+  }));
+
+const all = (await getCollection('posts'))
+  .filter((post) => !post.data.draft && splitPostId(post.id).group === groupId)
+  .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
+
+const counts: Record<string, number> = {};
+for (const post of all) counts[post.id] = countSections(post.body ?? '');
+
+const bySubtopic = new Map<string, typeof all>();
+const standalone: typeof all = [];
+for (const post of all) {
+  if (post.data.subtopic) bySubtopic.set(post.data.subtopic, [...(bySubtopic.get(post.data.subtopic) ?? []), post]);
+  else standalone.push(post);
+}
+for (const [key, list] of bySubtopic) {
+  bySubtopic.set(key, list.slice().sort((a, b) => (a.data.subtopicOrder ?? 0) - (b.data.subtopicOrder ?? 0)));
+}
+
+const registered = subtopicsForGroup(groupId);
+const extraIds = [...bySubtopic.keys()].filter((id) => !registered.some((s) => s.id === id));
+const subtopicCards = [...registered, ...extraIds.map((id) => getSubtopic(id))]
+  .map((s) => ({ subtopic: s, posts: bySubtopic.get(s.id) ?? [] }));
+
+const totalMinutes = all.reduce((sum, p) => sum + p.data.minutes, 0);
+const totalSections = Object.values(counts).reduce((a, b) => a + b, 0);
+
+// A reading path is only worth showing while every post on it is published.
+// The first-generation posts are drafts now, so their paths stay hidden
+// rather than listing a route the reader cannot follow.
+const published = new Set(all.map((post) => post.id));
+const groupReadingPaths = readingPaths.filter(
+  (path) =>
+    path.posts.every((id) => splitPostId(id).group === groupId) &&
+    path.posts.every((id) => published.has(id)),
+);
+
+const lessonCount = courses.reduce((sum, entry) => sum + entry.lessons.length, 0);
+---
+
+<Base title={group.title} description={group.tagline} group={group.id} nav="group">
+  <div class="page">
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/">Home</a><span aria-hidden="true">/</span>
+      <span aria-current="page">{group.title}</span>
+    </nav>
+
+    <div class="grid main-aside">
+      <div class="grid">
+        <header class="card">
+          <div class="card-head" data-tint="accent">
+            <span>{group.title}</span>
+            <Chip tint="grey">{courses.length === 1 ? '1 course' : `${courses.length} courses`}</Chip>
+          </div>
+          <div class="card-body">
+            <p class="group-tagline">{group.tagline}</p>
+            <div class="group-facts">
+              <span><b class="num">{lessonCount}</b> lessons written</span>
+              {all.length > 0 && <span><b class="num">{totalSections}</b> sections</span>}
+              {all.length > 0 && <span><b class="num">{Math.round(totalMinutes / 60)}</b> hours</span>}
+            </div>
+          </div>
+        </header>
+
+        {courses.map(({ course, lessons }) => (
+          <section class="card">
+            <div class="card-head" data-tint="accent">
+              <span>{course.data.title}</span>
+              <Chip tint="grey">Course</Chip>
+            </div>
+            <div class="card-body">
+              <p class="group-tagline">{course.data.tagline}</p>
+              <div class="group-facts">
+                <span><b class="num">{course.data.planned?.chapters ?? ''}</b> chapters</span>
+                <span><b class="num">{lessons.length}</b> of {course.data.planned?.lessons ?? lessons.length} lessons written</span>
+              </div>
+              <p class="course-cta"><a class="btn" href={courseHref(course.id, groupId)}>Start the course →</a></p>
+            </div>
+          </section>
+        ))}
+
+        {subtopicCards.map(({ subtopic, posts }) => (
+          <section class="card">
+            <div class="card-head" data-tint={subtopic.tint}>
+              <span>{subtopic.title}</span>
+              {posts.length === 0 && subtopic.status === 'coming-soon'
+                ? <Chip tint="grey">Coming soon</Chip>
+                : <span class="faint num">{posts.length} posts</span>}
+            </div>
+            {posts.length > 0 && (
+              <div class="row-list lesson-rows">
+                {posts.map((post) => (
+                  <a href={`/${post.id}/`}>
+                    <span class="faint num">{post.data.subtopicOrder ?? ''}</span>
+                    <span class="row-title">{post.data.title}</span>
+                    <span class="row-chips">
+                      {post.data.labModule && <span class="chip" data-tint="blue">Lab</span>}
+                      {post.data.stage === 'outline' && <span class="chip" data-status="new">Outline</span>}
+                    </span>
+                    <span class="row-meta num">{post.data.readingTime}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+            {posts.length === 0 && subtopic.status === 'coming-soon' && (
+              <div class="card-body"><p class="muted">{subtopic.planned ? `${subtopic.planned} posts planned.` : 'In planning.'}</p></div>
+            )}
+          </section>
+        ))}
+
+        {standalone.length > 0 && (
+          <section class="card">
+            <div class="card-head"><span>More from {group.title}</span><span class="faint num">{standalone.length}</span></div>
+            <div class="row-list">
+              {standalone.map((post) => (
+                <a href={`/${post.id}/`}>
+                  <span class="row-title">{post.data.title}</span>
+                  <span class="row-meta num">{post.data.readingTime}</span>
+                </a>
+              ))}
+            </div>
+          </section>
+        )}
+      </div>
+
+      {groupReadingPaths.length > 0 && (
+        <aside class="grid">
+          <section class="card">
+            <div class="card-head"><span>Reading paths</span></div>
+            <div class="row-list">
+              {groupReadingPaths.map((path) => (
+                <div>
+                  <span class="row-title">{path.title}</span>
+                  <span class="row-meta">{path.posts.length} posts</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        </aside>
+      )}
+    </div>
+  </div>
+</Base>
+
+<style>
+  .group-tagline { color: var(--ink-2); font-size: var(--text-read); max-width: var(--measure); }
+  .group-facts { color: var(--ink-3); display: flex; flex-wrap: wrap; font-size: var(--text-sm); gap: var(--space-4); margin-top: var(--space-4); }
+  .group-facts b { color: var(--ink); font-weight: var(--weight-bold); }
+
+  .course-cta { margin-top: var(--space-4); }
+  .lesson-rows > a { grid-template-columns: 1.5rem minmax(0, 1fr) auto auto; }
+  .row-chips { display: flex; gap: var(--space-1); }
+  @media (max-width: 640px) {
+    .lesson-rows > a { grid-template-columns: 1.5rem minmax(0, 1fr) 3rem; }
+    .row-chips { display: none; }
+  }
+</style>

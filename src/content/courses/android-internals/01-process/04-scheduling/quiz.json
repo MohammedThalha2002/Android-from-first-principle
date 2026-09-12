@@ -1,0 +1,78 @@
+{
+  "lesson": "1.4",
+  "title": "One core, many threads",
+  "questions": [
+    {
+      "stage": "pre",
+      "question": "Everyone says threads are expensive and coroutines are lightweight, but coroutines run on threads. What resolves that?",
+      "options": [
+        "Coroutines run on a special kind of lighter thread",
+        "A coroutine is an object on the heap that the scheduler never sees, and a suspended one holds no thread",
+        "Coroutines run on the GPU rather than the CPU",
+        "The runtime compiles coroutines into a single thread"
+      ],
+      "correct": 1,
+      "explanation": "Cost comes from being an operating system object with a stack and a place in the scheduler's list. A coroutine is neither, which is why thousands of them can share a small pool of real threads."
+    },
+    {
+      "stage": "check",
+      "question": "A phone has eight cores. How many threads are executing at this instant, across the whole device?",
+      "options": [
+        "As many as are ready to run",
+        "Eight, one per core",
+        "One, because Android is single threaded",
+        "It depends on how many apps are in the foreground"
+      ],
+      "correct": 1,
+      "explanation": "Everything beyond eight is waiting for a turn, and the appearance of more is the kernel switching quickly between them. That budget is shared by every app on the device at once."
+    },
+    {
+      "stage": "check",
+      "question": "Why does switching between two threads in the same process cost less than switching between two processes?",
+      "options": [
+        "Threads have smaller stacks than processes",
+        "The kernel does not need to save registers for a thread switch",
+        "The two threads share an address space, so the page table does not change",
+        "Thread switches happen in user space without involving the kernel"
+      ],
+      "correct": 2,
+      "explanation": "Registers, the program counter and the stack pointer are saved either way. The extra cost of a process switch is swapping the page table and losing the processor's cached address translations."
+    },
+    {
+      "stage": "check",
+      "question": "Your app crashes with \"OutOfMemoryError: pthread_create (1040KB stack) failed\". What ran out?",
+      "options": [
+        "The app's heap, from allocating too many objects",
+        "Memory for one more thread's stack",
+        "The device's storage",
+        "The scheduler's list of runnable threads"
+      ],
+      "correct": 1,
+      "explanation": "The message names the thing it could not get: the stack reserved for a new thread. It usually means an unbounded pool, or a library creating one thread per unit of work."
+    },
+    {
+      "stage": "post",
+      "question": "A developer moves image processing onto Dispatchers.IO because it is \"not the main thread\". What is the likely result?",
+      "options": [
+        "It is the correct fix, because IO is designed for heavy work",
+        "Nothing changes, because both dispatchers use the same pool",
+        "Many compute-hungry threads compete for cores, and everything including the main thread gets slower",
+        "The work runs on the GPU instead"
+      ],
+      "correct": 2,
+      "explanation": "The IO pool is large because its threads are expected to sit blocked without using a core. Computation does use a core, so a large pool of it produces exactly the switching cost this lesson describes, and Dispatchers.Default is sized near the core count to prevent that."
+    },
+    {
+      "stage": "post",
+      "question": "An app spawns one thread for each of two hundred list items. On a desktop it is fine; on a phone it stutters badly. What best explains the difference?",
+      "options": [
+        "Phone CPUs cannot run threads in parallel",
+        "Android limits an app to a fixed number of threads",
+        "Fewer cores and less memory, so the same thread count means more switching and more reserved stacks",
+        "The threads are being garbage collected during the work"
+      ],
+      "correct": 2,
+      "explanation": "The thread count did not change, but the number of cores to share them across did, and so did the memory available for stacks. The same code is simply asking for much more than the device has."
+    }
+  ]
+}

@@ -1,0 +1,261 @@
+/**
+ * Lesson pages.
+ *
+ * A lesson is a document, so it gets one surface rather than a stack of cards:
+ * header, prose, figure and questions all sit on the same sheet, separated by
+ * typography instead of borders. Beside it the chapter stays put, because two
+ * thousand words is long enough to lose your place in a course.
+ *
+ * Every colour comes from a token, as everywhere else.
+ */
+
+/* ── page layout ──────────────────────────────────────────────────
+   These were borrowed from Post.astro's scoped styles at first, which meant
+   they never applied here: an Astro <style> block only reaches the component
+   that declares it. Hence the flush-left prose. They live here now. */
+.lesson-grid {
+  align-items: start;
+  display: grid;
+  gap: var(--space-5);
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (min-width: 1000px) {
+  .lesson-grid { grid-template-columns: var(--section-list) minmax(0, 1fr); gap: var(--space-6); }
+}
+.lesson-main { display: grid; gap: var(--space-5); min-width: 0; }
+
+/* ── the chapter, and where you are in it ─────────────────────────
+   Sticky against the viewport: the chrome bar is a grid row rather than a
+   fixed element, so it scrolls away and needs no offset here. */
+@media (min-width: 1000px) {
+  .chapter-rail { position: sticky; top: var(--space-5); }
+  .rail-inner { max-height: calc(100vh - var(--space-8)); overflow-y: auto; }
+}
+.rail-chapter { margin: 0 0 var(--space-4); }
+.rail-chapter span {
+  color: var(--ink-3);
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.rail-chapter a {
+  color: var(--ink);
+  display: block;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+  margin-top: 2px;
+  text-decoration: none;
+}
+.rail-chapter a:hover { color: var(--accent); }
+
+.rail-spine { list-style: none; margin: 0; padding: 0; }
+.rail-spine li { position: relative; }
+/* the connector, drawn behind the markers */
+.rail-spine li::before {
+  background: var(--line);
+  content: '';
+  inset-block: 0;
+  left: 4px;
+  position: absolute;
+  width: 1px;
+}
+.rail-spine li:first-child::before { top: 1rem; }
+.rail-spine li:last-child::before { bottom: calc(100% - 1rem); }
+.rail-spine a {
+  align-items: baseline;
+  color: var(--ink-2);
+  display: grid;
+  font-size: var(--text-sm);
+  gap: var(--space-2);
+  grid-template-columns: 9px 1.9rem minmax(0, 1fr);
+  line-height: var(--leading-snug);
+  padding: var(--space-2) 0;
+  text-decoration: none;
+}
+.rail-spine a:hover { color: var(--ink); }
+.rail-marker { display: flex; position: relative; top: 0.4em; }
+.rail-marker i {
+  background: var(--canvas);
+  border: 1px solid var(--line-2);
+  border-radius: 50%;
+  height: 9px;
+  width: 9px;
+}
+.rail-n { color: var(--ink-3); font-family: var(--font-mono); font-size: var(--text-xs); }
+.here .rail-marker i { background: var(--accent); border-color: var(--accent); }
+.here .rail-n { color: var(--accent); }
+.here .rail-label { color: var(--ink); font-weight: var(--weight-semibold); }
+.rail-progress {
+  border-top: 1px solid var(--line);
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  margin: var(--space-4) 0 0;
+  padding-top: var(--space-3);
+}
+
+/* ── the sheet: one surface for the whole lesson ──────────────── */
+.sheet {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: clamp(var(--space-5), 4vw, var(--space-7)) clamp(var(--space-4), 4vw, var(--space-7)) var(--space-7);
+}
+.sheet > * + * { margin-top: var(--space-6); }
+
+.lesson-head { border-bottom: 1px solid var(--line); padding-bottom: var(--space-5); }
+.lesson-title {
+  font-size: var(--text-3xl);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.028em;
+  line-height: var(--leading-tight);
+  margin: 0;
+  max-width: 20ch;
+  text-wrap: balance;
+}
+/* The one line a reader should be able to repeat a week later, so it is the
+   one line here given weight. */
+.lesson-motto {
+  border-left: 3px solid var(--accent);
+  color: var(--ink);
+  font-size: var(--text-xl);
+  line-height: var(--leading-snug);
+  margin: var(--space-5) 0 0;
+  max-width: 44ch;
+  padding-left: var(--space-4);
+}
+.lesson-facts {
+  color: var(--ink-3);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+.fact b { color: var(--ink); font-family: var(--font-mono); font-weight: var(--weight-semibold); }
+.fact-link { color: var(--accent); text-decoration: none; }
+.fact-link:hover { text-decoration: underline; }
+
+.lesson-after { border-top: 1px solid var(--line); padding-top: var(--space-6); }
+.lesson-extras > h2:first-child,
+.lesson-after > h2:first-child { font-size: var(--text-xl); margin-top: 0; padding-top: 0; }
+
+/* ── the stepped figure ───────────────────────────────────────── */
+.fig {
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  margin: var(--space-5) 0;
+  padding: var(--space-4);
+}
+.fig-stage { overflow-x: auto; }
+.fig svg { display: block; height: auto; max-width: 100%; width: 100%; }
+.fig svg g[data-part] { opacity: 0.16; transition: opacity 320ms ease; }
+.fig svg g[data-part].on { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .fig svg g[data-part] { transition: none; }
+}
+.fig-note {
+  color: var(--ink);
+  font-size: var(--text-sm);
+  line-height: var(--leading-read);
+  margin: var(--space-3) 0;
+  max-width: var(--measure);
+  min-height: 3.2em;
+}
+.fig-ctl { align-items: center; display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.fig-btn {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--ink-2);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: var(--space-2) var(--space-3);
+}
+.fig-btn:hover { border-color: var(--ink-3); color: var(--ink); }
+.fig-btn[disabled] { cursor: default; opacity: 0.45; }
+.fig-dots { display: flex; gap: var(--space-1); }
+.fig-dot {
+  background: transparent;
+  border: 1px solid var(--ink-3);
+  border-radius: 50%;
+  cursor: pointer;
+  height: 9px;
+  padding: 0;
+  width: 9px;
+}
+.fig-dot.on { background: var(--accent); border-color: var(--accent); }
+.fig-count { color: var(--ink-3); font-family: var(--font-mono); font-size: var(--text-xs); }
+.fig figcaption {
+  color: var(--ink-3);
+  font-size: var(--text-sm);
+  margin-top: var(--space-3);
+  max-width: var(--measure);
+}
+.fig-all { margin-top: var(--space-3); }
+.fig-all summary { color: var(--ink-3); cursor: pointer; font-family: var(--font-mono); font-size: var(--text-xs); }
+.fig-all ol { color: var(--ink-2); font-size: var(--text-sm); margin: var(--space-3) 0 0; padding-left: var(--space-5); }
+
+/* ── the questions ────────────────────────────────────────────────
+   A question interrupts the reading on purpose, so it is allowed to look
+   unlike the prose around it. */
+.q {
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  margin: var(--space-5) 0;
+  padding: var(--space-5);
+}
+.q[data-stage='check'] { border-left: 3px solid var(--accent); }
+.q-label {
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  margin: 0 0 var(--space-2);
+}
+.q-text { font-size: var(--text-read); font-weight: var(--weight-semibold); margin: 0 0 var(--space-4); max-width: var(--measure); }
+.q-opts { display: grid; gap: var(--space-2); list-style: none; margin: 0; padding: 0; }
+.q-opts li { max-width: none; }
+.q-opt {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  cursor: pointer;
+  display: block;
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
+  padding: var(--space-3) var(--space-4);
+  text-align: left;
+  width: 100%;
+}
+.q-opt:hover { border-color: var(--ink-3); }
+.q-opt[data-state='right'] { background: var(--tint-green); border-color: var(--tint-green-ink); color: var(--tint-green-ink); }
+.q-opt[data-state='wrong'] { background: var(--tint-coral); border-color: var(--tint-coral-ink); color: var(--tint-coral-ink); }
+.q-exp {
+  border-top: 1px solid var(--line);
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-read);
+  margin: var(--space-4) 0 0;
+  max-width: var(--measure);
+  padding-top: var(--space-3);
+}
+
+/* ── previous and next ────────────────────────────────────────── */
+.lesson-footer { display: flex; flex-wrap: wrap; gap: var(--space-3); justify-content: space-between; }
+.lesson-footer .btn {
+  align-items: flex-start;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 20rem;
+  text-align: left;
+  white-space: normal;
+}
+.dir { font-family: var(--font-mono); font-size: var(--text-2xs); opacity: 0.7; }

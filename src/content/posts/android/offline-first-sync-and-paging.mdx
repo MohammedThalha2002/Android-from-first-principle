@@ -1,0 +1,484 @@
+---
+title: "Offline-First, Sync & Paging"
+navTitle: "Offline & paging"
+summary: "Local as the source of truth, the outbox, conflicts, sync mechanics, and paging as a protocol."
+readingTime: "4 hours"
+minutes: 255
+tags: ["offline first","single source of truth","stale while revalidate","outbox","mutation queue","optimistic ui","rollback","idempotency","conflict resolution","last write wins","etag","version vector","crdt","delta sync","sync token","networkcallback","workmanager","flicker back","offset pagination","keyset"]
+draft: true
+date: "2026-07-25"
+subtopic: "android-internals"
+subtopicOrder: 17
+part: "III"
+verifiedAgainst: "Room 2.8 · WorkManager 2.10 · compileSdk 36"
+stage: "outline"
+labModule: ":ch17-offline"
+sources: ["15-offline-first-and-synchronisation#Local as the source of truth","15-offline-first-and-synchronisation#Read strategies","15-offline-first-and-synchronisation#Write strategies","15-offline-first-and-synchronisation#Conflict resolution","15-offline-first-and-synchronisation#Sync mechanics","15-offline-first-and-synchronisation#Observing the network","15-offline-first-and-synchronisation#Consistency in the UI","15-offline-first-and-synchronisation#Testing sync","15-offline-first-and-synchronisation#Failure modes","15-offline-first-and-synchronisation#Cheat-sheet","16-paging-lists-images-and-media#Paging as a protocol","16-paging-lists-images-and-media#Paging 3","16-paging-lists-images-and-media#List performance","16-paging-lists-images-and-media#Failure modes","16-paging-lists-images-and-media#Cheat-sheet"]
+---
+What should the app show when the network is gone? **Everything.**
+
+Not a spinner, not an error screen — the content the user had a moment ago, plus the ability to keep working. That is achievable, and the design that achieves it is a single inversion of the usual data flow.
+
+This is the hardest correctness problem in client engineering, because it is a distributed-systems problem wearing a mobile app's clothes: two replicas, an unreliable link, concurrent writes on both sides, and a user who will judge you on whether their edit survived.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Local as the source of truth
+
+The inversion, stated plainly: **reads always come from disk. The network is a writer to the local store, never something the UI waits for.**
+
+<Diagram
+  caption="The inversion. The UI never waits on the network and never even knows it exists; the network's only job is to write into the same store the UI reads from."
+  label="Two diagrams compared: in the network-first design the UI calls the network and waits, falling back to a cache only on failure. In offline-first the UI observes the local database, and sync writes into that database, so the UI is never blocked on the network."
+>
+  <svg viewBox="0 0 660 236" width="660" height="236">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">NETWORK-FIRST — THE UI WAITS</text>
+    <rect x="14" y="28" width="120" height="40" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="74" y="52" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">UI</text>
+    <rect x="188" y="28" width="130" height="40" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="253" y="46" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">network</text>
+    <text x="253" y="60" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">may never answer</text>
+    <rect x="372" y="28" width="120" height="40" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-dasharray="4 3"/>
+    <text x="432" y="52" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-muted)">cache, maybe</text>
+    <path d="M134 48h54M318 48h54" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M180 42 L188 48 L180 54M364 42 L372 48 L364 54" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="530" y="52" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-warn)">offline: a spinner</text>
+
+    <text x="12" y="116" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">OFFLINE-FIRST — THE UI NEVER WAITS</text>
+    <rect x="14" y="126" width="120" height="40" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="74" y="150" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">UI</text>
+    <rect x="188" y="126" width="130" height="40" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="253" y="144" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-ok)">local store</text>
+    <text x="253" y="158" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">always answers</text>
+    <rect x="372" y="126" width="130" height="40" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="437" y="150" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">sync</text>
+    <path d="M134 146h54" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M180 140 L188 146 L180 152" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="161" y="138" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-ok)">Flow</text>
+    <path d="M372 146h-54" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M326 140 L318 146 L326 152" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="345" y="138" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-muted)">writes</text>
+    <text x="530" y="150" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-ok)">offline: everything</text>
+
+    <text x="330" y="206" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">The UI does not know whether the network exists. Chapter 15's Room invalidation</text>
+    <text x="330" y="222" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">makes the arrow from sync back to the UI automatic.</text>
+  </svg>
+</Diagram>
+
+```kotlin
+class ArticleRepository(private val dao: ArticleDao, private val api: Api) {
+    fun articles(): Flow<List<Article>> = dao.observeAll().map { it.map(Entity::toDomain) }
+
+    suspend fun sync() {
+        dao.upsert(api.fetchArticles().map(Dto::toEntity))   // writes to the same store
+    }
+}
+```
+
+Because Room re-runs observing queries when a table changes (ch. 15), the UI updates with nothing connecting them. The `ViewModel` never sees a loading state for data it already has, and there is no code path where "offline" means "empty screen".
+
+## Read strategies
+
+Given local-first, the question becomes when to refresh — and what to show while you do.
+
+| Strategy | Behaviour | Fits |
+|---|---|---|
+| Cache-then-network | show local, fetch, update | almost everything |
+| Stale-while-revalidate | same, plus an explicit freshness signal | content where age matters |
+| Network-only | no local copy | payment confirmation, one-time codes |
+
+**Store freshness, not just data.** A `syncedAt` per record or per collection is what lets you decide whether to refresh and what lets you be honest with the user:
+
+```kotlin
+@Entity data class ArticleEntity(/* ... */, val syncedAt: Long)
+```
+
+**Showing stale data with an honest indicator** beats both alternatives. Hiding staleness means the user acts on old information; blocking on refresh throws away the reason for having a local store. A quiet "Updated 2 hours ago" or an offline chip respects the user's judgement.
+
+## Write strategies
+
+Reads are the easy half. Writes are where the correctness problem is.
+
+**Write-through** — write locally and remotely together, failing if the network fails. Simple, and it means no offline writes, so it is not offline-first.
+
+**Write-back with an outbox** is the real pattern. The local write succeeds immediately; a durable queue of pending mutations drains when the network allows.
+
+```kotlin
+@Entity data class PendingMutation(
+    @PrimaryKey(autoGenerate = true) val localId: Long = 0,
+    val kind: String,               // "create" | "update" | "delete"
+    val entityId: String,
+    val payload: String,
+    val idempotencyKey: String,     // stable across retries (ch. 16)
+    val createdAt: Long,
+    val attempts: Int = 0,
+)
+```
+
+The properties that matter:
+
+**Durable.** The outbox is a table, so a pending write survives process death (ch. 5) and reboot. An in-memory queue loses the user's edit exactly when they least expect it.
+
+**Ordered.** Drain in creation order per entity. Applying a delete before its create leaves an orphan on the server.
+
+**Idempotent.** The key is generated once and stored, so a retry after an ambiguous failure — the request succeeded but the response was lost — does not duplicate (ch. 16).
+
+**Optimistic UI with rollback.** Apply the change locally at once, mark it pending, and reconcile when the server answers:
+
+```kotlin
+suspend fun rename(id: String, title: String) {
+    dao.update(id, title, pending = true)                       // instant
+    outbox.enqueue(Rename(id, title, idempotencyKey = uuid()))  // durable
+}
+```
+
+On permanent failure — a `4xx`, not a timeout — revert the local change and **tell the user**. A silent rollback is worse than an error: they saw it succeed.
+
+## Conflict resolution
+
+Two replicas, both edited, one link. Something has to give.
+
+| Strategy | How | When it fits |
+|---|---|---|
+| Last-write-wins | latest timestamp wins | low-stakes, single-user data |
+| Server-authoritative | server state always wins | the server has rules the client cannot know |
+| Per-field merge | merge non-overlapping fields | documents with independent fields |
+| ETag / version | reject a stale write, client re-applies | anything with real value |
+| CRDT | mathematically convergent types | collaborative editing |
+
+**Last-write-wins loses data silently**, and "latest" depends on clocks you do not control — device clocks are wrong, sometimes by years. If you use it, use the *server's* clock.
+
+**Version checks are the honest default for data that matters.** Send the version you read; the server rejects if it moved:
+
+```
+PUT /articles/42
+If-Match: "v7"
+→ 412 Precondition Failed        # someone else changed it; refetch and decide
+```
+
+**CRDTs, honestly:** conflict-free replicated data types converge without coordination, and they are the right answer for collaborative editing. For a typical app they are substantial complexity for a problem a version check solves. Reach for them when concurrent editing of the same field is the product, not an edge case.
+
+**Surface the conflict when the data deserves it.** A user's long note, silently overwritten, is data loss. Keeping both and asking is sometimes the only correct answer.
+
+## Sync mechanics
+
+**Full versus delta.** Full sync is simple and gets expensive as data grows. Delta sync asks "what changed since token X" and returns a new token:
+
+```kotlin
+suspend fun delta() {
+    var cursor = syncState.cursor()
+    do {
+        val page = api.changes(since = cursor, limit = 200)
+        db.withTransaction {                       // page and cursor commit together
+            dao.upsert(page.items.map(::toEntity))
+            dao.deleteAll(page.deletedIds)
+            syncState.setCursor(page.nextCursor)
+        }
+        cursor = page.nextCursor
+    } while (page.hasMore)
+}
+```
+
+The cursor must be committed **in the same transaction** as the data. Otherwise a crash between them means either replaying a page or, worse, skipping one.
+
+**Push-triggered sync.** FCM (ch. 9) as a "come and get it" signal, not as data. The push wakes the app, the app fetches authoritative state. Sending business data in a push payload eventually corrupts state, because pushes are lossy, unordered and size-limited.
+
+**Scheduling with WorkManager** (ch. 9) — durable, constraint-aware, survives reboot:
+
+```kotlin
+val work = PeriodicWorkRequestBuilder<SyncWorker>(6, TimeUnit.HOURS)
+    .setConstraints(Constraints.Builder()
+        .setRequiredNetworkType(NetworkType.CONNECTED)
+        .setRequiresBatteryNotLow(true)
+        .build())
+    .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+    .build()
+WorkManager.getInstance(ctx).enqueueUniquePeriodicWork("sync", KEEP, work)
+```
+
+Unique work with `KEEP` is what prevents fifty scheduled syncs after fifty app launches.
+
+## Observing the network
+
+**"isConnected" lies.** A device connected to Wi-Fi with no internet, a captive portal (ch. 16), or a VPN that is up but routing nowhere all report connected. What you want is `NET_CAPABILITY_VALIDATED` — the system actually reached the internet:
+
+```kotlin
+val request = NetworkRequest.Builder()
+    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    .build()
+```
+
+Even then, **treat connectivity as a hint, not a gate.** Do not check before acting; act, and handle failure. The check is racy — the network can drop between the check and the request — and a request that fails is information you needed anyway. Use connectivity to *trigger* a drain, not to decide whether to try.
+
+`NET_CAPABILITY_NOT_METERED` is the check that should gate a large download.
+
+## Consistency in the UI
+
+The bug that appears in every offline-first app on the first sync after an offline edit: **the item flickers back**.
+
+The user renames something offline. The local row updates. A sync arrives with the server's copy — which does not have the rename yet, because the outbox has not drained. The UI reverts, then flips forward again when the write lands.
+
+The fix is to **never let a server snapshot overwrite a locally pending change**:
+
+```kotlin
+suspend fun applyServer(items: List<Entity>) = db.withTransaction {
+    val pending = outbox.pendingEntityIds().toSet()
+    dao.upsert(items.filterNot { it.id in pending })   // pending rows keep their local value
+}
+```
+
+**Stable identity across the boundary** is the other half. An item created offline has no server id yet, so it needs a client-generated one — a UUID — that survives the round trip, with the server either adopting it or returning a mapping you apply in one transaction. Using a temporary negative id and swapping it later produces a moment where the UI's key changes, which breaks list animations (ch. 8, ch. 13) and scroll position.
+
+## Testing sync
+
+Sync is exactly the code that "works on my machine" and fails on a train. It has to be tested deterministically.
+
+**A fake server with controllable latency and failure** lets you write the cases that matter: request succeeds but the response is lost, connectivity drops mid-drain, a conflicting edit arrives.
+
+```kotlin
+@Test fun `a write survives an ambiguous failure without duplicating`() = runTest {
+    server.failNextWith(SocketTimeoutException())   // request arrived, response lost
+    repo.rename("1", "New")
+    syncer.drain()                                   // retries with the SAME idempotency key
+    syncer.drain()
+    assertEquals(1, server.appliedMutations.size)
+}
+```
+
+**Property-style tests over orderings** are worth the effort here: generate a set of offline operations, apply them in every order, and assert the final state converges. That is how you find the ordering bug that only occurs when a delete drains before its create.
+
+**Simulate offline in instrumented tests** with `svc data disable` / `svc wifi disable`, so airplane-mode behaviour is a test rather than a manual ritual.
+
+## Failure modes: Offline-first & sync
+
+**An offline edit is lost.** *Symptom:* rare complaints of a change that "did not save". *Cause:* the mutation queue was in memory and the process died (ch. 5). *Fix:* a durable outbox table.
+
+**A duplicate is created after a flaky connection.** *Symptom:* two records from one action. *Cause:* a retried write with a fresh idempotency key, or none. *Fix:* generate the key once, store it with the mutation.
+
+**An item flickers back to its old value after sync.** *Symptom:* an edit reverts, then reappears. *Cause:* a server snapshot overwriting a pending local change. *Fix:* exclude pending ids when applying server state.
+
+**Sync runs constantly and drains the battery.** *Symptom:* Play Console flags excessive wakeups. *Cause:* work enqueued per launch instead of unique periodic work, or no constraints. *Fix:* `enqueueUniquePeriodicWork` with `KEEP`, plus network and battery constraints (ch. 9).
+
+**Data is skipped after a crash mid-sync.** *Symptom:* records missing until a full resync. *Cause:* the cursor was committed separately from the page. *Fix:* one transaction.
+
+**Everything is stale on a hotel Wi-Fi.** *Symptom:* the app believes it is online and every request fails oddly. *Cause:* a captive portal, and a connectivity check that only asked for `INTERNET`. *Fix:* require `NET_CAPABILITY_VALIDATED`; treat connectivity as a hint.
+
+**A user's edit is silently overwritten by another device.** *Symptom:* work disappears, no error. *Cause:* last-write-wins on a device clock. *Fix:* version or ETag checks; surface the conflict.
+
+## Cheat-sheet: Offline-first & sync
+
+```kotlin
+// reads never touch the network
+fun items(): Flow<List<Item>> = dao.observeAll().map { it.map(Entity::toDomain) }
+
+// writes: local now, durable queue, drain later
+dao.update(id, value, pending = true)
+outbox.enqueue(Mutation(id, value, idempotencyKey = uuid()))
+
+// applying server state without clobbering pending local edits
+dao.upsert(serverItems.filterNot { it.id in outbox.pendingEntityIds() })
+
+// cursor and data commit together, or not at all
+db.withTransaction { dao.upsert(page.items); syncState.setCursor(page.next) }
+```
+
+```bash
+adb shell svc data disable && adb shell svc wifi disable   # the offline test
+adb shell am kill <pkg>            # prove the outbox survived (ch. 5)
+adb shell dumpsys jobscheduler | grep -A5 <pkg>            # is sync scheduled (ch. 9)
+```
+
+| Decision | Default |
+|---|---|
+| reads | local store only |
+| writes | optimistic local + durable outbox |
+| retries | idempotency key, generated once |
+| conflicts | version/ETag; surface it if the data matters |
+| connectivity | a hint that triggers a drain, never a gate |
+| scheduling | unique periodic work with constraints |
+
+<LabCard module=":ch15-offline">
+Build a to-do app that is fully usable with the radio off: create, edit and delete offline, sync on reconnect, and never lose a write. Then engineer the three failures that matter — kill the process with mutations pending, make a request succeed while its response is lost, and apply a conflicting edit from a second device. The third one has no single right answer; decide what your app should do and make the behaviour deliberate rather than accidental.
+</LabCard>
+
+## Paging as a protocol
+
+Pagination is a contract with the server, and the two common shapes differ in a way that matters on a mutating list.
+
+**Offset paging** — `?offset=40&limit=20` — is simple and **wrong on data that changes**. Between fetching page 2 and page 3, someone inserts an item at the top. Every subsequent row shifts down one, so the item that was at offset 60 is now at 61: the user sees a **duplicate** at the page boundary. Delete an item instead and one is **skipped entirely** — silently, with no error anywhere.
+
+**Keyset (cursor) paging** — `?after=<opaque cursor>&limit=20` — asks for what comes after a specific item. Inserts and deletes elsewhere do not shift the anchor, so the boundary stays correct. It is also faster on the server, because the database can seek an index rather than counting past `OFFSET` rows (ch. 15).
+
+Use keyset paging for anything that changes. Offset is acceptable for genuinely static, ordered data.
+
+<Diagram
+  caption="One insert at the top, and offset paging shows the same row twice. A cursor anchors to an item, so an insert elsewhere cannot shift the boundary."
+  label="Comparison diagram: with offset pagination an item inserted at the top of a list shifts every row down by one, so the row at the page boundary is fetched twice and appears as a duplicate. With keyset pagination the next page is requested after a specific item id, so an insert elsewhere does not move the boundary."
+>
+  <svg viewBox="0 0 660 262" width="660" height="262">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">OFFSET — THE BOUNDARY MOVES</text>
+    <rect x="12" y="26" width="180" height="82" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="24" y="44" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">page 1: offset 0, limit 3</text>
+    <text x="24" y="62" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">0  article D</text>
+    <text x="24" y="78" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">1  article C</text>
+    <text x="24" y="94" font-family="var(--font-mono)" font-size="10" fill="var(--dg-accent)">2  article B</text>
+
+    <rect x="236" y="26" width="190" height="82" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="248" y="44" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">then someone inserts at the top</text>
+    <text x="248" y="62" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">0  article E   (new)</text>
+    <text x="248" y="78" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">1  article D</text>
+    <text x="248" y="94" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">2  article C</text>
+
+    <rect x="470" y="26" width="178" height="82" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="482" y="44" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">page 2: offset 3</text>
+    <text x="482" y="62" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">3  article B   AGAIN</text>
+    <text x="482" y="78" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">4  article A</text>
+    <text x="482" y="96" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">a delete would SKIP one</text>
+    <path d="M192 66h44M426 66h44" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <text x="12" y="146" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">KEYSET — THE BOUNDARY IS AN ITEM</text>
+    <rect x="12" y="154" width="180" height="66" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="24" y="172" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">page 1: limit 3</text>
+    <text x="24" y="190" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">article D, C</text>
+    <text x="24" y="208" font-family="var(--font-mono)" font-size="10" fill="var(--dg-accent)">article B  (cursor)</text>
+
+    <rect x="236" y="154" width="190" height="66" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="248" y="172" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">insert at the top changes</text>
+    <text x="248" y="190" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">nothing about the anchor —</text>
+    <text x="248" y="208" font-family="var(--font-mono)" font-size="10" fill="var(--dg-accent)">still after article B</text>
+
+    <rect x="470" y="154" width="178" height="66" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="482" y="172" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">page 2: after = B</text>
+    <text x="482" y="192" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">article A  — correct</text>
+    <path d="M192 187h44M426 187h44" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+
+    <text x="330" y="250" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">It is also faster on the server: seek an index, rather than counting past OFFSET rows.</text>
+  </svg>
+</Diagram>
+
+## Paging 3
+
+The library exists because doing this correctly by hand — loading, appending, retrying, deduplicating, surviving rotation — is more work than it looks.
+
+```kotlin
+class ArticleSource(private val api: Api) : PagingSource<String, Article>() {
+    override suspend fun load(params: LoadParams<String>): LoadResult<String, Article> = try {
+        val page = api.articles(after = params.key, limit = params.loadSize)
+        LoadResult.Page(page.items, prevKey = page.prevCursor, nextKey = page.nextCursor)
+    } catch (e: CancellationException) { throw e          // ch. 12
+    } catch (e: IOException) { LoadResult.Error(e) }
+
+    override fun getRefreshKey(state: PagingState<String, Article>) =
+        state.anchorPosition?.let { state.closestItemToPosition(it)?.id }
+}
+```
+
+`getRefreshKey` is the one people get wrong: on refresh it decides where to resume, so returning null sends the user back to the top of the list after every refresh.
+
+**`RemoteMediator` is what makes paging offline-first** (ch. 17). Room is the `PagingSource`; the mediator fetches from the network and *writes into the database* when the list runs out:
+
+```kotlin
+override suspend fun load(loadType: LoadType, state: PagingState<Int, ArticleEntity>): MediatorResult {
+    val cursor = when (loadType) {
+        REFRESH -> null
+        PREPEND -> return MediatorResult.Success(endOfPaginationReached = true)
+        APPEND -> keyDao.next() ?: return MediatorResult.Success(true)
+    }
+    val page = api.articles(after = cursor)
+    db.withTransaction {                                    // page and key together (ch. 17)
+        if (loadType == REFRESH) { dao.clearAll(); keyDao.clear() }
+        dao.upsert(page.items.map(::toEntity))
+        keyDao.set(page.nextCursor)
+    }
+    return MediatorResult.Success(endOfPaginationReached = page.nextCursor == null)
+}
+```
+
+The UI never observes the network — it observes Room, exactly as chapter 17 requires.
+
+**`LoadState`** drives the UI: separate states for refresh, prepend and append, each of which can be loading, error or idle. A retry belongs at the point of failure — a footer for a failed append, a full-screen state for a failed refresh — not one generic error for all three.
+
+**Placeholders** show the right scroll extent before data arrives, which keeps the scrollbar honest and prevents the list jumping. They need a known total count and null-tolerant binding; without a count, turn them off.
+
+**Test a `PagingSource` directly** — it is an ordinary suspend function returning a value, so no UI is required.
+
+## List performance
+
+Chapters 8 and 13 covered the mechanisms; this is the checklist.
+
+**Stable keys.** `key` in `LazyColumn`, `setHasStableIds` with a `RecyclerView`. Without them an insert invalidates everything below it.
+
+**Content types.** `contentType` partitions the reuse pool so a header is never reused as a row.
+
+**Stable item size.** A view whose height changes on bind forces a layout pass every frame (ch. 8). Reserve space for images with a fixed aspect ratio rather than letting the row resize when the bitmap arrives.
+
+**Never nest the same scroll axis.** A vertical list inside a vertical scroller either throws or composes every item, defeating laziness entirely.
+
+**Prefetch distance** trades memory for smoothness. The defaults are reasonable; increase only with a measurement showing you need it.
+
+**Measure with Macrobenchmark** (ch. 11), because scroll performance is exactly the thing intuition gets wrong:
+
+```kotlin
+@Test fun scrollFeed() = benchmarkRule.measureRepeated(
+    packageName = "dev.firstprinciples.android",
+    metrics = listOf(FrameTimingMetric()),
+    compilationMode = CompilationMode.Partial(),      // realistic: a Baseline Profile applied
+    startupMode = StartupMode.WARM,
+    iterations = 10,
+) { /* fling the list */ }
+```
+
+## Failure modes: Paging, lists & media
+
+**`OutOfMemoryError` when opening a photo.** *Symptom:* crashes concentrated on devices with smaller heaps. *Cause:* decoding at full resolution — 48 MB for a 12 MP image. *Fix:* decode at target size; consider `RGB_565` or `HARDWARE`.
+
+**The list scrolls smoothly, then re-downloads everything.** *Symptom:* network traffic on every scroll pass. *Cause:* an unstable request key or size, or an undersized disk cache. *Fix:* stable URL and size; check the cache stats.
+
+**Duplicate or missing rows at a page boundary.** *Symptom:* an item appears twice, or vanishes. *Cause:* offset paging on mutating data. *Fix:* keyset pagination.
+
+**Refresh sends the user back to the top.** *Symptom:* pull-to-refresh loses the scroll position. *Cause:* `getRefreshKey` returning null. *Fix:* anchor on the closest item.
+
+**The camera preview freezes after a few seconds.** *Symptom:* analysis stops, preview stalls. *Cause:* `ImageProxy` not closed, exhausting the buffer queue. *Fix:* close in a `finally`; use `KEEP_ONLY_LATEST`.
+
+**Audio stops when the app is backgrounded.** *Symptom:* playback ends on leaving the app. *Cause:* no foreground service. *Fix:* `MediaSessionService` with the `mediaPlayback` type (ch. 9).
+
+**Rows jump as images load.** *Symptom:* the list shifts while scrolling. *Cause:* item height depending on the image. *Fix:* a fixed aspect ratio, so space is reserved before the bitmap arrives.
+
+## Cheat-sheet: Paging, lists & media
+
+```kotlin
+// decode at the size you will display, never full size then scale
+ImageDecoder.decodeBitmap(source) { d, _, _ -> d.setTargetSize(w, h) }
+
+// list: keys, content types, reserved space
+items(list, key = { it.id }, contentType = { it.kind })
+Modifier.aspectRatio(16f / 9f)
+
+// paging that survives offline
+RemoteMediator writes into Room; Room is the PagingSource (ch. 17)
+
+// camera analysis, without freezing the preview
+.setBackpressureStrategy(STRATEGY_KEEP_ONLY_LATEST)   // and close() every ImageProxy
+```
+
+```bash
+adb shell dumpsys meminfo <pkg> | grep -i graphics    # bitmap memory
+adb shell dumpsys gfxinfo <pkg> framestats            # scroll jank (ch. 8)
+adb shell dumpsys media_session | head -30
+```
+
+| Symptom | Cause |
+|---|---|
+| OOM on images | decoding at full resolution |
+| re-downloads on scroll | unstable cache key or size |
+| duplicates at a boundary | offset paging |
+| refresh jumps to top | `getRefreshKey` |
+| preview freezes | unclosed `ImageProxy` |
+| rows jump | item height depends on the image |
+
+<LabCard module=":ch16-paging">
+Build an infinite feed backed by Room and a `RemoteMediator`, with images, that works offline. Then add the gate that makes it stay fast: a Macrobenchmark scroll test that **fails CI if p90 frame time regresses**. Take the baseline on a mid-range device, not your laptop's emulator — the number only means something if it comes from hardware a user might actually own.
+</LabCard>

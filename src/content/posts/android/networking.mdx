@@ -1,0 +1,320 @@
+---
+title: "Networking"
+navTitle: "Networking"
+summary: "The radio, the battery and a connection that vanishes mid-request. OkHttp, the typed layer, auth, transport security and an error taxonomy."
+readingTime: "2 hours"
+minutes: 125
+tags: ["radio state machine","tail energy","okhttp","interceptor","connection pool","retrofit","ktor","kotlinx serialization","moshi","authenticator","token refresh","pkce","certificate pinning","network security config","idempotency key","backoff jitter","circuit breaker","graphql","grpc"]
+draft: true
+date: "2026-07-18"
+subtopic: "android-internals"
+subtopicOrder: 16
+part: "III"
+verifiedAgainst: "OkHttp 5.1 · Retrofit 3.0 · Kotlin 2.3 · compileSdk 36"
+stage: "outline"
+labModule: ":ch16-networking"
+sources: ["13-networking-on-a-mobile-device#The mobile-specific constraints","13-networking-on-a-mobile-device#OkHttp as the engine","13-networking-on-a-mobile-device#The typed layer","13-networking-on-a-mobile-device#Serialisation","13-networking-on-a-mobile-device#Auth","13-networking-on-a-mobile-device#Transport security","13-networking-on-a-mobile-device#Error taxonomy","13-networking-on-a-mobile-device#Other protocols","13-networking-on-a-mobile-device#Observability","13-networking-on-a-mobile-device#Failure modes","13-networking-on-a-mobile-device#Cheat-sheet"]
+---
+A server-side HTTP client runs on a machine with a fixed power supply, a stable network and a datacentre round trip measured in single-digit milliseconds. Almost none of that holds on a phone.
+
+The radio costs battery in a way that has nothing to do with bytes transferred. Latency dominates bandwidth. The connection can vanish mid-request and come back on a different network with a different IP. A captive portal will return a login page with a `200`. Designing for those is what makes a mobile client different, and it is why "just call the API" produces apps that drain batteries and fail in ways nobody reproduces at a desk.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## The mobile-specific constraints
+
+**The radio state machine** is the one most engineers have never seen. A cellular radio is not on or off; it has power states, and moving up costs latency while moving down takes seconds of **tail time** during which the radio stays powered at the higher state.
+
+The consequence is stark: a request every 30 seconds can keep the radio in a high-power state almost continuously, while the same total bytes sent in one burst lets it drop back down. **Batching is worth more than compression** for battery, and it is why WorkManager's constraints (ch. 9) let the system coalesce your work with other apps'.
+
+**Latency over bandwidth.** A mobile round trip is tens to hundreds of milliseconds. Ten sequential requests is ten round trips regardless of payload size, which is why chattiness hurts far more than payload size — and why HTTP/2 multiplexing over one connection matters.
+
+**The network you get is not the network you assumed:**
+
+- **Captive portals** intercept and return a login page with a success status. Your JSON parser sees HTML.
+- **IPv6-only carriers** exist; hardcoded IPv4 or literal addresses break.
+- **VPNs** change routing and can defeat certificate pinning.
+- **Metered connections** should change behaviour — no prefetching video on cellular.
+
+## OkHttp as the engine
+
+Nearly every Android HTTP stack is OkHttp underneath, so its behaviour is your behaviour.
+
+**Connection pooling** is where most of the win is. Establishing a TLS connection costs a TCP handshake plus a TLS handshake — several round trips before a byte of yours moves. OkHttp keeps connections alive and reuses them, and with HTTP/2 multiplexes concurrent requests over one. **Share a single `OkHttpClient`**: a new one per request means a new pool and a new handshake every time, which is a common and expensive mistake.
+
+**Two kinds of interceptor**, and the difference matters:
+
+```kotlin
+OkHttpClient.Builder()
+    .addInterceptor(AuthInterceptor(tokens))       // application: runs once per call
+    .addNetworkInterceptor(LoggingInterceptor())   // network: runs per actual network request
+    .build()
+```
+
+An **application** interceptor runs once per call, sees the original request, and does not run when the cache serves it. A **network** interceptor runs for every real network request — including each redirect and retry — and sees the wire-level request. Auth belongs in an application interceptor; logging what actually went out belongs in a network one.
+
+**Timeouts** are four separate things, and defaults are rarely right for mobile:
+
+```kotlin
+.connectTimeout(10, SECONDS)   // establishing the connection
+.readTimeout(20, SECONDS)      // between bytes arriving
+.writeTimeout(20, SECONDS)     // between bytes sent
+.callTimeout(60, SECONDS)      // the whole call, including redirects — set this
+```
+
+`callTimeout` is the one people forget, and without it a call can hang far longer than any individual timeout suggests.
+
+**The HTTP cache** is standard and underused. Given a cache directory and correct server headers, OkHttp serves repeat requests without touching the network. `Cache-Control` on the response is the server's job; `CacheControl` on the request is how you say "stale is fine, I am offline" — which chapter 17 builds on.
+
+**`EventListener`** gives per-phase timings — DNS, connect, TLS, first byte — which is how you find out that your "slow API" is actually slow DNS on one carrier.
+
+## The typed layer
+
+**Retrofit** turns an interface into an HTTP client, and with coroutines the signature is exactly what you want:
+
+```kotlin
+interface Api {
+    @GET("articles/{id}")
+    suspend fun article(@Path("id") id: String): Article           // throws on non-2xx
+
+    @GET("articles")
+    suspend fun articles(@Query("page") page: Int): Response<List<Article>>   // gives you the code
+}
+```
+
+Returning `Response<T>` when you need the status or the error body; returning `T` when any failure is exceptional. Mixing both in one API is a source of confusion — pick one per layer and map at the repository (ch. 14).
+
+**Ktor Client** is the alternative, and the honest comparison: Ktor is multiplatform (appendix A) with a plugin-based pipeline; Retrofit is Android-native, has a larger ecosystem and a smaller learning curve. If you share code with iOS, Ktor. Otherwise Retrofit.
+
+## Serialisation
+
+**`kotlinx.serialization`** is the default choice, for a reason that goes back to chapter 2: it generates serialisers **at compile time**, so there is no reflection and therefore no R8 keep rules to get wrong. A reflective parser is exactly the thing R8 cannot see, which is why "works in debug, empty objects in release" is nearly always a serialisation problem.
+
+**Gson is a liability with Kotlin.** It constructs objects by reflection, bypassing constructors — so default values are not applied and a missing JSON field leaves a non-null Kotlin property holding `null`. Your code then throws a `NullPointerException` on a property the type system promised was non-null (ch. 12). Moshi with its Kotlin codegen is safe; Gson is not.
+
+**Schema evolution** is a client problem because old clients live for years:
+
+```kotlin
+@Serializable
+data class Article(
+    val id: String,
+    val title: String,
+    val summary: String? = null,        // added later — nullable with a default
+    val kind: Kind = Kind.Unknown,      // unknown enum values map here, not a crash
+)
+```
+
+Configure the parser to **ignore unknown keys**, or every new server field breaks every deployed client. And give enums an unknown fallback; a server adding a variant should not crash yesterday's app.
+
+## Auth
+
+The part with the most subtle concurrency bug in mobile networking.
+
+**Token storage:** an access token in memory, a refresh token in encrypted storage (ch. 15). Never in `SharedPreferences` in plaintext.
+
+**Refresh** belongs in OkHttp's `Authenticator`, which is invoked on a `401` and retries the request:
+
+```kotlin
+class TokenAuthenticator(private val tokens: TokenStore) : Authenticator {
+    override fun authenticate(route: Route?, response: Response): Request? {
+        if (response.request.header("Authorization") != null && responseCount(response) >= 2) {
+            return null      // already retried — give up rather than loop forever
+        }
+        val fresh = runBlocking { tokens.refreshSingleFlight() } ?: return null
+        return response.request.newBuilder().header("Authorization", "Bearer $fresh").build()
+    }
+}
+```
+
+**Single-flight is the requirement.** Ten parallel requests hitting an expired token produce ten `401`s and, naively, ten refresh calls. With refresh-token rotation, the first invalidates the token the other nine are using — so nine fail, the user is logged out, and it only happens under concurrency.
+
+```kotlin
+class TokenStore(private val scope: CoroutineScope, private val api: AuthApi) {
+    private var inFlight: Deferred<String?>? = null
+    private val mutex = Mutex()
+
+    suspend fun refreshSingleFlight(): String? = mutex.withLock {
+        inFlight?.takeIf { it.isActive } ?: scope.async { doRefresh() }.also { inFlight = it }
+    }.await()
+}
+```
+
+One refresh; the other nine await its result.
+
+<Diagram
+  caption="Ten expired requests, one refresh. Without the mutex each 401 starts its own refresh, and with token rotation the first one invalidates the token the other nine are still using."
+  label="Sequence comparison: naive handling of ten parallel 401 responses starts ten refreshes, and refresh-token rotation invalidates nine of them so the user is logged out. Single-flight refresh takes a mutex so one refresh runs and the other nine await its result, then all ten retry successfully."
+>
+  <svg viewBox="0 0 660 268" width="660" height="268">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">NAIVE — TEN REFRESHES</text>
+    <rect x="12" y="26" width="112" height="46" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="68" y="46" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">10 requests</text>
+    <text x="68" y="61" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">token expired</text>
+    <rect x="168" y="26" width="112" height="46" rx="7" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="224" y="53" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">10 x 401</text>
+    <rect x="324" y="26" width="128" height="46" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="388" y="46" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">10 refresh calls</text>
+    <text x="388" y="61" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">rotation invalidates</text>
+    <rect x="496" y="26" width="152" height="46" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="572" y="46" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">9 fail</text>
+    <text x="572" y="61" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">user logged out</text>
+    <path d="M124 49h44M280 49h44M452 49h44" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <text x="12" y="128" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">SINGLE-FLIGHT — ONE REFRESH</text>
+    <rect x="12" y="136" width="112" height="46" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="68" y="163" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">10 requests</text>
+    <rect x="168" y="136" width="112" height="46" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="224" y="156" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">mutex</text>
+    <text x="224" y="171" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">first one wins</text>
+    <rect x="324" y="136" width="128" height="46" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="388" y="156" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">1 refresh</text>
+    <text x="388" y="171" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">9 await the same one</text>
+    <rect x="496" y="136" width="152" height="46" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="572" y="163" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">all 10 retry, succeed</text>
+    <path d="M124 159h44M280 159h44M452 159h44" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+
+    <text x="330" y="222" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">The bug only appears under concurrency, which is why it reaches production:</text>
+    <text x="330" y="240" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">one request at a time always works.</text>
+  </svg>
+</Diagram>
+
+**`401` versus `403`.** A `401` means "your credentials are missing or expired" — refresh and retry. A `403` means "you are authenticated and not allowed" — refreshing changes nothing, so logging the user out on a `403` signs them out for asking about someone else's data.
+
+**OAuth with PKCE** goes through Custom Tabs (appendix B), never a WebView — a WebView means your app can read the user's password, which is exactly what the flow exists to prevent. **Credential Manager** unifies passwords, passkeys and federated sign-in.
+
+## Transport security
+
+**Cleartext is off by default** since Android 9 <ApiLevel changedIn="28" />. A `NetworkSecurityConfig` re-enables it for a named domain, which is the correct way to allow a local development server without opening the whole app.
+
+```xml
+<network-security-config>
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="true">10.0.2.2</domain>   <!-- the emulator's host -->
+  </domain-config>
+  <debug-overrides>
+    <trust-anchors><certificates src="user" /></trust-anchors>   <!-- debug builds only -->
+  </debug-overrides>
+</network-security-config>
+```
+
+`debug-overrides` is how a proxy like Charles or Proxyman can inspect traffic in debug builds without weakening release.
+
+**Certificate pinning** ties your app to a specific certificate or key. It defeats a proxy holding a user-installed CA — and it is an **operational risk you must plan for**: when the certificate rotates and the pinned app has not been updated, every install is bricked until the user updates. Pin to an intermediate or a backup key, set an expiry, and have a remote kill switch (ch. 20). For most apps, standard TLS validation is the right answer and pinning is not worth the outage risk.
+
+## Error taxonomy
+
+The single highest-value thing in this chapter: **different failures deserve different user-visible outcomes**, and collapsing them into "something went wrong" is a design failure.
+
+| Failure | User sees | Retry? |
+|---|---|---|
+| No connectivity | "You are offline" plus cached content (ch. 17) | automatically, on reconnect |
+| Timeout | "Taking longer than usual", with a retry | yes, with backoff |
+| 5xx | "Something went wrong on our end" | yes, backoff and jitter |
+| 429 | nothing visible; wait | yes, honour `Retry-After` |
+| 4xx (not 401/429) | a specific message — it will not fix itself | **no** |
+| Parse failure | a generic error, and a log with high priority | no — it is a bug |
+
+```kotlin
+sealed interface ApiError {
+    data object Offline : ApiError
+    data object Timeout : ApiError
+    data class Server(val code: Int) : ApiError
+    data class Client(val code: Int, val message: String?) : ApiError
+    data class Malformed(val cause: Throwable) : ApiError
+}
+```
+
+**Retry only what can succeed.** Retrying a `400` wastes battery and radio for a request that will never work.
+
+**Backoff with jitter** matters at scale: without a random component, every client that failed at the same instant retries at the same instant and re-creates the outage (ch. 12).
+
+**Idempotency keys** make retries safe for writes. Retrying "create order" without one may create two:
+
+```kotlin
+@POST("orders") suspend fun create(@Header("Idempotency-Key") key: String, @Body order: Order)
+```
+
+Generate the key once per logical operation and reuse it across retries, including retries after process death — which means storing it with the pending operation (ch. 17).
+
+**Circuit breaking** stops hammering an endpoint that is failing: after N consecutive failures, fail fast for a cooldown. On mobile the win is battery, not server load.
+
+## Other protocols
+
+**GraphQL (Apollo)** replaces many endpoints with one query language and a normalised cache, so a field updated in one screen updates everywhere. The costs: queries are easy to write badly, and the normalised cache is another source of truth to reconcile with your local store (ch. 17).
+
+**gRPC** gives generated types, streaming and an efficient binary encoding. On mobile, weigh the code size of the runtime and the fact that it does not traverse every corporate proxy.
+
+**Server-sent events** are a one-way stream over plain HTTP — much cheaper than a WebSocket when you only need server-to-client, and they work through most proxies (ch. 9).
+
+Each changes the client architecture, and the choice belongs at the repository boundary (ch. 14) so the rest of the app does not know.
+
+## Observability
+
+**Log without leaking.** An HTTP logging interceptor at `BODY` level in release will write tokens, personal data and payloads to logcat, where any app with the right permissions historically could read them. Restrict it to debug builds and redact headers:
+
+```kotlin
+if (BuildConfig.DEBUG) {
+    addNetworkInterceptor(HttpLoggingInterceptor().apply {
+        level = HttpLoggingInterceptor.Level.BODY
+        redactHeader("Authorization")
+        redactHeader("Cookie")
+    })
+}
+```
+
+**Correlate with the backend.** Send a request id header and log it on both sides; a client-side failure then leads directly to a server trace (ch. 20). `EventListener` gives the phase timings that separate "the server is slow" from "DNS is slow on this carrier".
+
+## Failure modes: Networking
+
+**Users are logged out at random, mostly on app open.** *Symptom:* sporadic sign-outs, unreproducible. *Cause:* parallel `401`s each triggering refresh; rotation invalidated the token the others held. *Fix:* single-flight refresh.
+
+**Works in debug, empty objects in release.** *Symptom:* fields silently null after minification. *Cause:* a reflective serialiser stripped by R8 (ch. 2). *Fix:* `kotlinx.serialization`, or correct keep rules.
+
+**A non-null field is null and the app crashes.** *Symptom:* NPE on a property the type says cannot be null. *Cause:* Gson bypassing constructors and defaults. *Fix:* Moshi codegen or `kotlinx.serialization`.
+
+**Battery complaints with modest data usage.** *Symptom:* Play Console flags excessive wakeups; users report drain. *Cause:* frequent small requests holding the radio in a high-power state. *Fix:* batch; use WorkManager constraints (ch. 9).
+
+**Every client retries at the same second after an outage.** *Symptom:* the backend recovers and immediately falls over. *Cause:* backoff without jitter. *Fix:* add randomness.
+
+**Duplicate orders after a flaky connection.** *Symptom:* two records from one user action. *Cause:* a retried non-idempotent write. *Fix:* an idempotency key, persisted with the operation.
+
+**The app breaks for everyone on a Tuesday with no release.** *Symptom:* total failure, all versions. *Cause:* a rotated certificate against a pinned app. *Fix:* backup pins and an expiry; reconsider whether pinning is worth it.
+
+## Cheat-sheet: Networking
+
+```kotlin
+// one client, shared
+val client = OkHttpClient.Builder()
+    .callTimeout(60, SECONDS)                          // the one people forget
+    .addInterceptor(AuthInterceptor(tokens))           // once per call
+    .addNetworkInterceptor(logging)                    // per network request, debug only
+    .authenticator(TokenAuthenticator(tokens))         // single-flight refresh
+    .cache(Cache(cacheDir, 20L * 1024 * 1024))
+    .build()
+
+// retry only what can succeed
+when (error) {
+    Offline, Timeout, is Server -> retryWithJitteredBackoff()
+    is Client, is Malformed     -> surfaceToUser()
+}
+```
+
+```bash
+adb shell dumpsys connectivity | head -30
+adb shell svc data disable   # then enable — the airplane-mode-mid-request test
+adb shell settings put global captive_portal_mode 0
+```
+
+| Symptom | Cause |
+|---|---|
+| random logouts | no single-flight refresh |
+| empty objects in release only | reflective serialiser + R8 |
+| NPE on a non-null field | Gson |
+| battery drain, little data | unbatched requests, radio tail |
+| duplicate writes | no idempotency key |
+
+<LabCard module=":ch13-networking">
+Build a client that survives three specific things and prove each: toggling airplane mode **mid-request** and recovering, refreshing an expired token **exactly once** under ten parallel calls (assert the refresh endpoint was hit once), and reporting each error class distinctly rather than as one generic failure. The concurrency test is the one that matters — it is the bug that only appears in production.
+</LabCard>

@@ -1,0 +1,64 @@
+<svg viewBox="0 0 700 340" role="img" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="dg-arrow-f" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-line)"/>
+    </marker>
+    <marker id="dg-arrow-w" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-warn)"/>
+    </marker>
+  </defs>
+
+  <g data-part="parent">
+    <rect x="240" y="10" width="220" height="92" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="350" y="32" text-anchor="middle" font-family="var(--font-ui)" font-size="13" fill="var(--dg-label)">the parent process</text>
+  </g>
+
+  <g data-part="framework">
+    <rect x="256" y="42" width="188" height="22" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="350" y="58" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">framework classes</text>
+    <rect x="256" y="70" width="188" height="22" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="350" y="86" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">the runtime</text>
+  </g>
+
+  <g data-part="fork-1">
+    <path d="M270 102 C 200 124 160 140 150 166" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-f)"/>
+    <text x="172" y="130" font-family="var(--font-mono)" font-size="11" fill="var(--dg-muted)">fork</text>
+  </g>
+
+  <g data-part="fork-2">
+    <path d="M430 102 C 500 124 540 140 550 166" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-f)"/>
+    <text x="502" y="130" font-family="var(--font-mono)" font-size="11" fill="var(--dg-muted)">fork</text>
+  </g>
+
+  <g data-part="child-1">
+    <rect x="30" y="172" width="216" height="80" rx="8" fill="var(--dg-fill)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="138" y="196" text-anchor="middle" font-family="var(--font-ui)" font-size="13" fill="var(--dg-label)">your app</text>
+    <text x="138" y="216" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-muted)">pid 9871</text>
+    <text x="138" y="238" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">framework already loaded</text>
+  </g>
+
+  <g data-part="child-2">
+    <rect x="454" y="172" width="216" height="80" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="562" y="196" text-anchor="middle" font-family="var(--font-ui)" font-size="13" fill="var(--dg-label)">another app</text>
+    <text x="562" y="216" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-muted)">pid 9903</text>
+    <text x="562" y="238" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">framework already loaded</text>
+  </g>
+
+  <g data-part="shared">
+    <rect x="272" y="180" width="156" height="64" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5" stroke-dasharray="5 3"/>
+    <text x="350" y="204" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">one copy in memory</text>
+    <text x="350" y="224" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">shared by all three</text>
+    <path d="M266 212 H 246" fill="none" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <path d="M434 212 H 454" fill="none" stroke="var(--dg-accent)" stroke-width="1.5"/>
+  </g>
+
+  <g data-part="write">
+    <path d="M138 256 V 284" fill="none" stroke="var(--dg-warn)" stroke-width="2" marker-end="url(#dg-arrow-w)"/>
+    <text x="150" y="276" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">writes to one page</text>
+  </g>
+
+  <g data-part="private">
+    <rect x="30" y="290" width="216" height="38" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <text x="138" y="314" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">a private copy of that page only</text>
+  </g>
+</svg>

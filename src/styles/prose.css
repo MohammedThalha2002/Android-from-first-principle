@@ -1,0 +1,81 @@
+/* The reading column. Sans throughout, lifted a step above the UI scale and
+   opened to --leading-read so a three-hour chapter is comfortable. */
+.prose {
+  color: var(--ink);
+  font-family: var(--font-prose);
+  font-size: var(--text-read);
+  line-height: var(--leading-read);
+  max-width: var(--measure);
+}
+
+.prose > * + * { margin-top: var(--space-4); }
+
+.prose :is(h2, h3, h4) { color: var(--ink); letter-spacing: var(--tracking-tight); line-height: var(--leading-tight); }
+.prose h2 { font-size: var(--text-xl); margin-top: var(--space-7); padding-top: var(--space-5); border-top: 1px solid var(--line); scroll-margin-top: calc(var(--chrome-bar) + var(--space-5)); }
+.prose > h2:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+.prose h3 { font-size: var(--text-lg); margin-top: var(--space-6); }
+.prose h4 { font-size: var(--text-base); margin-top: var(--space-5); text-transform: uppercase; letter-spacing: var(--tracking-caps); color: var(--ink-3); }
+
+.prose :is(p, li) { color: var(--ink-2); }
+.prose strong { color: var(--ink); font-weight: var(--weight-bold); }
+.prose em { color: var(--ink); }
+.prose a { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.16em; }
+
+.prose ul, .prose ol { padding-left: 1.4em; }
+.prose li + li { margin-top: var(--space-2); }
+
+.prose code {
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  padding: 0.08em 0.3em;
+}
+
+/* Fenced code: dark in both themes, in its own scroll container. */
+.prose pre {
+  background: var(--code-bg) !important;
+  border-radius: var(--radius-lg);
+  color: var(--code-ink);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  max-width: var(--measure-wide);
+  overflow-x: auto;
+  padding: var(--space-4) var(--space-5);
+}
+.prose pre code { background: none; border: 0; color: inherit; font-size: inherit; padding: 0; }
+
+/* Tables scroll inside their own box; the page never scrolls sideways. */
+.prose table { border-collapse: collapse; display: block; font-size: var(--text-sm); max-width: var(--measure-wide); overflow-x: auto; }
+.prose :is(th, td) { border-bottom: 1px solid var(--line); padding: var(--space-2) var(--space-3); text-align: left; vertical-align: top; }
+.prose th { color: var(--ink-3); font-size: var(--text-xs); font-weight: var(--weight-semibold); }
+
+/* Folded answers: the interview sections and the chapter rounds are made of
+   these, so they are styled here rather than on the lesson page alone. */
+.prose details {
+  border-left: 2px solid var(--line-2);
+  margin: 0 0 var(--space-4);
+  max-width: var(--measure);
+  padding: 0 0 0 var(--space-4);
+}
+.prose details[open] { border-left-color: var(--accent); }
+.prose details > summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  list-style: none;
+  padding: var(--space-1) 0;
+}
+.prose details > summary::-webkit-details-marker { display: none; }
+.prose details > summary::before { content: '▸ '; font-size: 0.85em; }
+.prose details[open] > summary::before { content: '▾ '; }
+.prose details > *:not(summary) { margin-top: var(--space-3); }
+
+
+.prose blockquote { border-left: 3px solid var(--accent); color: var(--ink-2); margin-inline: 0; padding-left: var(--space-4); }
+.prose hr { border: 0; border-top: 1px solid var(--line); }
+.prose img, .prose svg { max-width: 100%; }

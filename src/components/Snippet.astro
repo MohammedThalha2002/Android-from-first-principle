@@ -1,0 +1,90 @@
+---
+/**
+ * Include code FROM a lab module, at build time.
+ *
+ *   <Snippet file="labs/ch05-main-thread/src/main/kotlin/Debounce.kt" region="debounce" lang="kotlin" />
+ *
+ * The notes do not hold their own copy of the code. The file is the source,
+ * CI compiles it, and this reads the region between
+ *
+ *   // region:debounce
+ *   …
+ *   // endregion
+ *
+ * A missing file or region throws at build time rather than shipping a
+ * silently empty block — the sibling repo's README had to *ask* contributors
+ * to keep two copies in sync, a rule enforced by nothing.
+ *
+ * Prose-only illustrations (a wrong-way example, a manifest fragment, an adb
+ * transcript) stay ordinary fenced blocks with a title.
+ */
+import { Code } from 'astro:components';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { dedent, extractRegion, languageFor } from '../lib/snippet';
+
+interface Props {
+  /** Path from the repository root. */
+  file: string;
+  /** Region marker name; omit to include the whole file. */
+  region?: string;
+  lang?: string;
+  /** Filename shown in the header bar. Defaults to the file's basename. */
+  title?: string;
+}
+
+const { file, region, lang, title } = Astro.props;
+const language = lang ?? languageFor(file);
+
+let source: string;
+try {
+  source = await readFile(resolve(process.cwd(), file), 'utf8');
+} catch {
+  throw new Error(`<Snippet> cannot read "${file}". The path is relative to the repository root.`);
+}
+
+const code = region ? extractRegion(source, region, file) : dedent(source);
+
+const filename = title ?? file.split('/').pop();
+---
+
+<figure class="snippet">
+  <figcaption>
+    <span class="snippet-file">{filename}</span>
+    <span class="snippet-lang">{region ? `${language} · ${region}` : language}</span>
+  </figcaption>
+  <Code code={code} lang={language as any} theme="github-dark" />
+</figure>
+
+<style>
+  .snippet {
+    background: var(--code-bg);
+    border-radius: var(--radius-lg);
+    margin: var(--space-5) 0;
+    max-width: var(--measure-wide);
+    overflow: hidden;
+  }
+
+  figcaption {
+    align-items: center;
+    background: var(--code-surface);
+    display: flex;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    gap: var(--space-3);
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-4);
+  }
+  .snippet-file { color: var(--code-ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .snippet-lang { color: var(--code-ink-3); flex: none; }
+
+  .snippet :global(pre) {
+    background: transparent !important;
+    border-radius: 0;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    margin: 0;
+    overflow-x: auto;
+    padding: var(--space-4) var(--space-5);
+  }
+</style>

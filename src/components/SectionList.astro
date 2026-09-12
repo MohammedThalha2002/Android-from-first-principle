@@ -1,0 +1,103 @@
+---
+/**
+ * The post's own sections, in the left rail — a jump-link table of contents.
+ *
+ * This replaces two separate things: a list of every post in the group
+ * (which belongs on the group home, not on a page you are reading) and a
+ * right-hand table of contents that duplicated these same headings. One list
+ * that jumps to a section is less UI and more useful than either.
+ *
+ * A <details> rather than a plain list, because on a phone the rail stacks
+ * ABOVE the post: left open it would push the prose down past eleven rows
+ * before a reader reached the first sentence. The pre-paint script below
+ * collapses it under 1000px and leaves it open on a desktop rail.
+ */
+interface Section { id: string; title: string; }
+
+interface Props {
+  sections: Section[];
+}
+
+const { sections } = Astro.props;
+---
+
+<nav class="seclist-wrap" aria-label="Sections in this post">
+  <details class="seclist card" open data-section-list>
+    <summary class="seclist-head">
+      <svg class="seclist-chevron" viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true">
+        <path d="M4 6.5 8 10.5 12 6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="seclist-title">Sections</span>
+      <span class="num faint">{sections.length}</span>
+    </summary>
+
+    <ol class="seclist-rows">
+      {sections.map((section) => (
+        <li class="secrow" data-section-id={section.id}>
+          <a class="secrow-link" href={`#${section.id}`}>{section.title}</a>
+        </li>
+      ))}
+    </ol>
+  </details>
+</nav>
+
+<script is:inline>
+  // Pre-paint. Collapses the rail on a phone before the browser paints, so
+  // it never flashes open before collapsing.
+  (() => {
+    try {
+      const root = document.querySelector('[data-section-list]');
+      if (!root) return;
+      if (window.matchMedia('(max-width: 999px)').matches) root.removeAttribute('open');
+    } catch {}
+  })();
+</script>
+
+<script>
+  const root = document.querySelector<HTMLElement>('[data-section-list]');
+  if (root) {
+    const rows = Array.from(root.querySelectorAll<HTMLElement>('[data-section-id]'));
+    const scroller = root.querySelector<HTMLElement>('.seclist-rows')!;
+
+    // Highlight the section being read: the last heading whose top has passed
+    // under the chrome bar. An IntersectionObserver band was tried first and
+    // was wrong most of the time — scroll to a point where no heading sits
+    // inside the band and nothing is highlighted at all.
+    const tracked = rows
+      .map((row) => ({ row, heading: document.getElementById(row.dataset.sectionId!) }))
+      .filter((entry): entry is { row: HTMLElement; heading: HTMLElement } => Boolean(entry.heading));
+
+    if (tracked.length) {
+      let queued = 0;
+
+      const paintCurrent = () => {
+        const threshold = 140;
+        let active = tracked[0];
+        for (const entry of tracked) {
+          if (entry.heading.getBoundingClientRect().top <= threshold) active = entry;
+          else break;
+        }
+        if (active.row.dataset.current === 'true') return;
+
+        for (const row of rows) delete row.dataset.current;
+        active.row.dataset.current = 'true';
+
+        // Only nudge the rail when the active row is actually out of sight,
+        // so the list does not yank itself around while the reader scrolls.
+        const rowTop = active.row.offsetTop;
+        const rowBottom = rowTop + active.row.offsetHeight;
+        const viewTop = scroller.scrollTop;
+        const viewBottom = viewTop + scroller.clientHeight;
+        if (rowTop < viewTop || rowBottom > viewBottom) {
+          scroller.scrollTo({ top: rowTop - scroller.clientHeight / 2, behavior: 'smooth' });
+        }
+      };
+
+      addEventListener('scroll', () => {
+        if (queued) return;
+        queued = requestAnimationFrame(() => { queued = 0; paintCurrent(); });
+      }, { passive: true });
+      paintCurrent();
+    }
+  }
+</script>

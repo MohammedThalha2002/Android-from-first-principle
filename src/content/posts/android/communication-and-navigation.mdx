@@ -1,0 +1,407 @@
+---
+title: "Communication & Navigation"
+navTitle: "Intents & navigation"
+summary: "Intents, deep links, App Links and package visibility, then navigation as state: dialogs and tabs are locations too."
+readingTime: "2 hours"
+minutes: 115
+tags: ["single activity","back stack","navbackstackentry","type-safe routes","nested graph","deep link","synthesised back stack","dialog destination","bottom sheet","adaptive navigation","multiple back stacks","predictive back","onbackpresseddispatcher","navigation testing"]
+draft: true
+date: "2026-05-16"
+subtopic: "android-internals"
+subtopicOrder: 7
+part: "II"
+verifiedAgainst: "Navigation 2.9 · Compose BOM 2026.09 · compileSdk 36"
+stage: "outline"
+labModule: ":ch07-navigation"
+sources: ["03-component-model-manifest-and-intents#Intents","03-component-model-manifest-and-intents#Intent filters, deep links &amp; App Links","03-component-model-manifest-and-intents#Package visibility","10-navigation-and-the-back-stack#From many Activities to one","10-navigation-and-the-back-stack#Navigation as a state machine","10-navigation-and-the-back-stack#Type-safe routes","10-navigation-and-the-back-stack#Graph structure","10-navigation-and-the-back-stack#Deep links into a stack","10-navigation-and-the-back-stack#Non-screen destinations","10-navigation-and-the-back-stack#Adaptive navigation","10-navigation-and-the-back-stack#Result passing &amp; shared state","10-navigation-and-the-back-stack#Predictive back","10-navigation-and-the-back-stack#Testing navigation","10-navigation-and-the-back-stack#Failure modes","10-navigation-and-the-back-stack#Cheat-sheet"]
+---
+"Where is the user?" is a question with an answer, and that answer is **state**. It can be saved, restored, tested and reasoned about — or it can be scattered across Activity launch modes, fragment transactions and a boolean somewhere deciding whether a dialog is showing.
+
+Almost every navigation bug is a state-ownership bug: two things believe they own the current location, or something that *is* location is not stored as location. The dialog that reappears after rotation is the canonical example, and it is fixed by making the dialog part of navigation state.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Intents
+
+An intent is a message describing something to be done. It has two forms, and the difference is who decides the target.
+
+**Explicit** — you name the component. Used inside your own app.
+
+```kotlin
+startActivity(Intent(this, DetailActivity::class.java).putExtra("id", articleId))
+```
+
+**Implicit** — you describe the *intent* and let the system find a handler.
+
+```kotlin
+val intent = Intent(Intent.ACTION_VIEW, "https://example.com/a/42".toUri())
+startActivity(intent)
+```
+
+An intent carries an **action** (what to do), **data** (a URI), a **type** (a MIME type), **categories** (context, like `CATEGORY_BROWSABLE`) and **extras** (a `Bundle` of parameters).
+
+<Diagram
+  caption="Implicit intent resolution. The system, not your app, picks the target — and every stage can eliminate every candidate, which is why an unguarded startActivity can crash."
+  label="Flowchart of implicit intent resolution: the package manager filters visible packages, then matches action, then category, then data scheme and MIME type, producing zero, one or several candidates; zero throws ActivityNotFoundException and several show a chooser."
+>
+  <svg viewBox="0 0 660 268" width="660" height="268">
+    <rect x="10" y="16" width="126" height="38" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="73" y="33" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">your intent</text>
+    <text x="73" y="46" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">action, data, category</text>
+
+    <rect x="168" y="16" width="140" height="38" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="238" y="33" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">visible packages</text>
+    <text x="238" y="46" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">filtered by queries</text>
+
+    <rect x="340" y="16" width="126" height="38" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="403" y="39" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">match action</text>
+
+    <rect x="498" y="16" width="152" height="38" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="574" y="39" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">match category</text>
+
+    <path d="M136 35h32M308 35h32M466 35h32" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <rect x="340" y="86" width="310" height="38" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="495" y="103" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">match data: scheme, host, path, MIME type</text>
+    <text x="495" y="116" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">a filter must satisfy every part it declares</text>
+    <path d="M574 54 L574 74 L495 74 L495 86" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <rect x="14" y="156" width="196" height="52" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="112" y="176" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">no match</text>
+    <text x="112" y="192" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">ActivityNotFoundException</text>
+
+    <rect x="232" y="156" width="196" height="52" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="330" y="176" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">exactly one</text>
+    <text x="330" y="192" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">starts directly</text>
+
+    <rect x="450" y="156" width="196" height="52" rx="7" fill="var(--dg-fill)" stroke="var(--dg-ok)"/>
+    <text x="548" y="176" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-ok)">several</text>
+    <text x="548" y="192" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">chooser, or the user default</text>
+
+    <path d="M495 124 L495 140 L112 140 L112 156" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <path d="M330 140 L330 156" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M548 140 L548 156" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+
+    <text x="330" y="238" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">every stage can eliminate every candidate — including package visibility,</text>
+    <text x="330" y="254" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">which is why an intent that worked on Android 10 can find nothing on 11.</text>
+  </svg>
+</Diagram>
+
+Two practical rules follow. **An implicit `startActivity` can always throw**, so either wrap it or check first — and note that `resolveActivity` is itself subject to package visibility, so on Android 11+ it can return null for an app that exists. Catching `ActivityNotFoundException` is more honest than pre-checking.
+
+**Prefer the chooser for sharing.** `Intent.createChooser` always shows the picker rather than silently using a default the user set once, and it is the difference between "share" working and "share always opens the wrong app".
+
+Extras travel in a `Bundle`, and a `Bundle` crosses Binder — so chapter 2's transaction buffer applies. An intent carrying a list of model objects is the same `TransactionTooLargeException` in different clothing. Pass an id; load the data on the other side.
+
+## Intent filters, deep links &amp; App Links
+
+An intent filter is the declaration that makes a component reachable by an implicit intent. For a URL it looks like this:
+
+```xml
+<activity android:name=".DetailActivity" android:exported="true">
+  <intent-filter android:autoVerify="true">
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="https" android:host="example.com" android:pathPrefix="/a/" />
+  </intent-filter>
+</activity>
+```
+
+The categories are not decoration. `DEFAULT` is required for any implicit intent to match at all, and `BROWSABLE` is required for a link from a browser.
+
+**A custom scheme is not a deep link worth having.** `myapp://article/42` can be registered by any other app on the device, and nothing arbitrates. It is unauthenticated by construction.
+
+**App Links** fix that with `autoVerify`. At install the system fetches `https://example.com/.well-known/assetlinks.json` and checks that it names your package and your signing certificate fingerprint. If it verifies, your app opens those links directly, with no disambiguation dialog and no possibility of another app claiming them.
+
+```json
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "dev.firstprinciples.android",
+    "sha256_cert_fingerprints": ["AB:CD:..."]
+  }
+}]
+```
+
+Verification fails quietly, which is the trap: your links simply stop opening in your app and start opening in a browser. The fingerprint must be the one the app was **signed with** — with Play App Signing that is Play's key, not your upload key (ch. 20), which is the single most common cause of a link that works in debug and not in production.
+
+```
+$ adb shell pm get-app-links dev.firstprinciples.android
+  dev.firstprinciples.android:
+    ID: ...
+    Signatures: [AB:CD:...]
+    Domain verification state:
+      example.com: verified
+      staging.example.com: 1024   # failed to fetch
+```
+
+## Package visibility
+
+Before Android 11, any app could enumerate every installed package. That is a fingerprinting surface — the list of apps on a phone is unusually identifying — so it was closed.
+
+Since Android 11 <ApiLevel changedIn="30" /> your app sees only: itself, a small set of always-visible system packages, apps that interact with yours, and whatever you **declare** in `queries`.
+
+```xml
+<queries>
+  <package android:name="com.example.partner" />
+  <intent>
+    <action android:name="android.intent.action.VIEW" />
+    <data android:scheme="https" />
+  </intent>
+</queries>
+```
+
+The failure is silent and confusing: `resolveActivity` returns null, `queryIntentActivities` returns an empty list, and `getPackageInfo` throws `NameNotFoundException` — all for an app that is definitely installed. The code did not change; the platform's answer did. `QUERY_ALL_PACKAGES` exists and is restricted by Play policy to a narrow set of app categories; declaring what you actually need is both easier to justify and less work than a policy appeal.
+
+## From many Activities to one
+
+Early Android put each screen in its own Activity. Every transition was an OS-level operation with an intent, and sharing anything meant serialising it through a `Bundle` — with chapter 2's transaction limit.
+
+Single-activity architecture keeps **one** Activity and makes screens lightweight destinations inside it. Transitions become in-process state changes: no intent, no serialisation, shared `ViewModel`s possible, and the whole back stack inspectable as a list.
+
+The task stack (ch. 5) does not go away — it still sits above yours. Back pops your in-app stack until it is empty, then pops the task. The two are different stacks with different owners, and confusing them is what produces "back exits the app from the middle of a flow".
+
+<Diagram
+  caption="Two stacks. Navigation owns the inner one; the OS owns the outer one. Back pops the inner until it is empty, then the outer."
+  label="Diagram of two stacks: the OS task stack contains one Activity for a single-activity app, and inside it the navigation back stack holds destinations. Back pops navigation entries first, and only pops the task once the navigation stack is empty."
+>
+  <svg viewBox="0 0 660 232" width="660" height="232">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">OS TASK STACK — SHOWN IN RECENTS, OWNED BY THE SYSTEM</text>
+    <rect x="8" y="26" width="420" height="152" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-dasharray="4 3"/>
+    <text x="22" y="46" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">MainActivity</text>
+
+    <text x="34" y="70" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-accent)">NAVIGATION BACK STACK — OWNED BY YOU</text>
+    <rect x="30" y="78" width="376" height="88" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <rect x="42" y="88" width="352" height="22" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="52" y="103" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">Feed            (bottom)</text>
+    <rect x="42" y="114" width="352" height="22" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="52" y="129" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">ArticleDetail(id = 42)</text>
+    <rect x="42" y="140" width="352" height="22" rx="4" fill="var(--dg-fill)" stroke="var(--dg-accent)"/>
+    <text x="52" y="155" font-family="var(--font-mono)" font-size="10" fill="var(--dg-accent)">Comments        (top — current)</text>
+
+    <path d="M470 60 L470 150" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M464 142 L470 150 L476 142" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="484" y="76" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">back pops HERE first,</text>
+    <text x="484" y="92" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">one destination at a time</text>
+    <text x="484" y="126" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-warn)">only when this stack is</text>
+    <text x="484" y="142" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-warn)">empty does back leave</text>
+    <text x="484" y="158" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-warn)">the app entirely</text>
+
+    <text x="330" y="206" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">every entry has its own lifecycle, its own SavedStateHandle,</text>
+    <text x="330" y="222" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">and can own a ViewModel scoped to exactly that entry.</text>
+  </svg>
+</Diagram>
+
+## Navigation as a state machine
+
+The back stack is a list of **entries**, and each entry is more than a label. It has its own `Lifecycle` (ch. 5), its own `SavedStateHandle`, and its own `ViewModelStore`.
+
+That last point is the one to internalise: **a `ViewModel` can be scoped to a back stack entry.** Navigate away and back, and it is the same instance; pop the entry, and `onCleared` runs. State disappears exactly when the screen it belonged to does — no manual clearing, no leak.
+
+Entry lifecycles behave as you would hope: the top entry is RESUMED, entries below it are CREATED (or STARTED, under a transparent destination). So `repeatOnLifecycle(STARTED)` on a screen under a dialog behaves correctly without any special handling.
+
+Because the stack is state, it is saved and restored across process death (ch. 5) — provided everything in it is small and parcelable, which is the constraint behind the next section.
+
+## Type-safe routes
+
+String routes (`"detail/{id}"`) put the compiler on the sidelines: a typo is a runtime crash, and every argument is a string you parse by hand.
+
+Type-safe navigation uses serializable objects:
+
+```kotlin
+@Serializable data class ArticleDetail(val id: String, val fromSearch: Boolean = false)
+
+composable<ArticleDetail> { entry ->
+    val route: ArticleDetail = entry.toRoute()
+    DetailScreen(route.id)
+}
+
+navController.navigate(ArticleDetail(id = "42"))
+```
+
+Now a missing argument is a compile error and types survive the round trip.
+
+**The size rule is the same as everywhere else in this series:** a route is saved state, so it goes into a `Bundle` and crosses Binder (ch. 2). Passing a whole model object through a route is `TransactionTooLargeException` waiting to happen, and it is stale by definition — the copy in the route does not update when the data does. **Pass an id; load the data at the destination.** Chapter 17's local-first store makes that load cheap.
+
+## Graph structure
+
+A **nested graph** groups destinations that belong to one flow — checkout, onboarding, a settings section — and gives that group its own start destination and its own scope for a shared `ViewModel`.
+
+```kotlin
+navigation<CheckoutGraph>(startDestination = Cart) {
+    composable<Cart> { ... }
+    composable<Payment> { ... }
+    composable<Confirmation> { ... }
+}
+```
+
+In a modular app (ch. 14) each feature module contributes its graph, and the app module composes them. The feature never learns about its siblings; navigation between features goes through an interface the app implements.
+
+**Conditional start without a flicker** is the common structural problem: an auth gate that shows the login screen only when needed. Deciding *inside* a composable means the wrong screen composes first and then navigates away, which the user sees. Decide before the graph is built:
+
+```kotlin
+val start = if (session.isLoggedIn) HomeGraph else AuthGraph   // resolved before composing
+NavHost(navController, startDestination = start) { ... }
+```
+
+If the answer requires I/O, hold on the splash screen until it is known (ch. 11) rather than showing a screen you intend to replace.
+
+## Deep links into a stack
+
+A deep link (ch. 6) drops the user into the middle of your app. The naive implementation leaves them on a detail screen with nothing behind it, so back exits immediately — technically correct and a bad experience.
+
+**Synthesise a back stack** so "up" has somewhere to go:
+
+```kotlin
+val pending = TaskStackBuilder.create(context)
+    .addNextIntentWithParentStack(deepLinkIntent)   // uses parentActivityName / the graph
+    .getPendingIntent(requestCode, PendingIntent.FLAG_IMMUTABLE)   // ch. 6
+```
+
+In Navigation, `NavDeepLinkBuilder` does the same by building the destination chain from the graph.
+
+**Up and back stay different** (ch. 5). Back is chronological: from a deep link with nothing behind it, back should leave the app. Up is hierarchical: it goes to the parent, even if the user never visited it. Implementing up as back is what produces "the back button exits from a screen I navigated into".
+
+## Non-screen destinations
+
+The insight that fixes a whole class of bugs: **a dialog is a location.**
+
+```kotlin
+dialog<ConfirmDelete> { ConfirmDeleteDialog(...) }
+```
+
+A dialog rendered from a local boolean is not part of navigation state, so it is lost on rotation — or worse, restored inconsistently, so the dialog reappears while the state behind it moved on. As a destination it lives in the back stack: rotation restores it, back dismisses it, and process death handles it like any other entry.
+
+The same applies to bottom sheets. If it can be dismissed with back, it is navigation state.
+
+## Adaptive navigation
+
+Chapter 19's size classes change what navigation *means*, not just how it looks.
+
+| Class | Chrome | List-detail |
+|---|---|---|
+| Compact | bottom bar | one pane; detail is a destination |
+| Medium | rail | two panes, or list with an overlay detail |
+| Expanded | rail or drawer | two panes side by side |
+
+The hard part is **back when panes merge**. On expanded, list and detail are both visible, so back from detail should leave the screen — there is nothing to go back to. On compact the same action returns to the list. The adaptive navigation libraries model this with a "three-pane scaffold" that tracks which pane is showing, so back is derived from layout rather than hardcoded.
+
+**Multiple back stacks** for tabs: each tab keeps its own history, so switching tabs and returning restores where you were. Without it, a tab switch resets the tab you left — a bug users notice immediately even if they cannot name it.
+
+```kotlin
+navController.navigate(tab) {
+    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+    launchSingleTop = true
+    restoreState = true
+}
+```
+
+Those three flags together are the whole pattern: save the outgoing tab's stack, do not stack duplicates, restore the incoming tab's stack.
+
+## Result passing &amp; shared state
+
+Three options, in order of preference.
+
+**A shared `ViewModel` scoped to a nested graph** — the cleanest for a multi-step flow. Both screens read and write one object, and it is cleared when the flow is popped.
+
+**`savedStateHandle` on the previous entry** — for a genuine one-off return value:
+
+```kotlin
+navController.previousBackStackEntry?.savedStateHandle?.set("picked", id)
+navController.popBackStack()
+```
+
+It survives process death because it is saved state.
+
+**Why a "navigation event bus" usually ends badly.** A global `SharedFlow` of navigation events looks decoupled and creates two problems. Events are lost while nothing is collecting — guaranteed to happen with `repeatOnLifecycle` (ch. 5, ch. 12) — and the destination is decided far from the screen that triggered it, so nothing local tells you where a button goes. If you need one, use a `Channel` for exactly-once delivery, and keep it scoped to a screen rather than the app.
+
+## Predictive back
+
+<ApiLevel min="33" /> Predictive back shows the destination behind the gesture as the user drags, so they can see where back leads and abandon it mid-swipe.
+
+That requires the system to know the destination *before* the gesture commits, which the old `onBackPressed` could not provide — it was called only on commit. The migration is to `OnBackPressedDispatcher`, and in Compose to `BackHandler` with progress:
+
+```kotlin
+BackHandler(enabled = hasUnsavedChanges) { showDiscardDialog() }
+```
+
+`enabled` is the important parameter. A handler that is always enabled tells the system "something will intercept this", so it cannot animate a prediction. Enable it only while it genuinely has something to do — that keeps prediction working everywhere else.
+
+Opt in with `android:enableOnBackInvokedCallback="true"`.
+
+## Testing navigation
+
+Navigation is state, so it is assertable rather than something you verify by eye.
+
+```kotlin
+@Test fun deepLinkLandsOnDetailWithASaneUp() {
+    val controller = TestNavHostController(context).apply {
+        navigatorProvider.addNavigator(ComposeNavigator())
+        setGraph(R.navigation.main)
+    }
+    controller.navigate(Uri.parse("https://example.com/a/42"))
+
+    assertEquals(ArticleDetail::class.qualifiedName, controller.currentDestination?.route)
+    assertEquals("42", controller.currentBackStackEntry?.toRoute<ArticleDetail>()?.id)
+    assertEquals(2, controller.backStack.size)      // Feed synthesised beneath it
+}
+```
+
+Three things are worth asserting on every navigation change: the destination, the arguments, and the **depth of the back stack** — the third is what catches a deep link that arrived with nothing behind it.
+
+## Failure modes: Navigation
+
+**A dialog reappears after rotation.** *Symptom:* a confirm dialog returns, sometimes over the wrong screen. *Cause:* dialog visibility in a local boolean rather than navigation state. *Fix:* a `dialog` destination.
+
+**Back exits the app from the middle of a flow.** *Symptom:* back from a deep-linked screen closes the app. *Cause:* nothing synthesised beneath it. *Fix:* build the parent stack; keep up and back distinct.
+
+**Switching tabs loses your place.** *Symptom:* returning to a tab resets it to the top. *Cause:* a single back stack shared by all tabs. *Fix:* `saveState`/`restoreState` with `popUpTo`.
+
+**`TransactionTooLargeException` on rotation of a detail screen.** *Symptom:* crash only on screens reached with an argument. *Cause:* a model object in the route, saved into the `Bundle`. *Fix:* pass an id.
+
+**Login flashes for a logged-in user.** *Symptom:* a brief wrong screen on cold start. *Cause:* the auth check ran after composition began. *Fix:* resolve the start destination before building the graph.
+
+**A `ViewModel` outlives its flow and shows stale data.** *Symptom:* re-entering checkout shows the previous attempt. *Cause:* scoped to the Activity rather than the graph. *Fix:* `navGraphViewModels` / a route-scoped `ViewModel`.
+
+**Predictive back does not animate.** *Symptom:* no preview on Android 13+. *Cause:* an always-enabled `BackHandler`, or no manifest opt-in. *Fix:* `enabled` reflecting real state; set the manifest flag.
+
+## Cheat-sheet: Navigation
+
+```kotlin
+// type-safe destination
+@Serializable data class ArticleDetail(val id: String)
+composable<ArticleDetail> { it.toRoute<ArticleDetail>().id }
+
+// tabs with independent history
+navController.navigate(tab) {
+    popUpTo(graph.findStartDestination().id) { saveState = true }
+    launchSingleTop = true; restoreState = true
+}
+
+// a one-off result, surviving process death
+navController.previousBackStackEntry?.savedStateHandle?.set("picked", id)
+
+// a dialog IS a destination
+dialog<ConfirmDelete> { ConfirmDeleteDialog() }
+```
+
+```bash
+adb shell am start -a android.intent.action.VIEW -d "https://example.com/a/42"
+adb shell dumpsys activity activities | sed -n '/Task{/,/Run #0/p'
+```
+
+| Symptom | Cause |
+|---|---|
+| dialog returns after rotation | not a destination |
+| back exits mid-flow | no synthesised stack |
+| tab resets | one shared back stack |
+| crash on rotate with args | an object in the route |
+| stale flow state | wrong `ViewModel` scope |
+
+<LabCard module=":ch10-navigation">
+Build a three-tab app where each tab keeps its own back stack, a deep link lands on a detail screen with a sensible "up", and a bottom sheet survives rotation. Assert all three in tests rather than by hand — destination, arguments, and back-stack depth — because the depth assertion is the one that catches a deep link with nothing behind it, which is invisible when you test by tapping.
+</LabCard>

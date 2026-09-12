@@ -1,0 +1,447 @@
+---
+title: "Your app is a process"
+motto: "The process is a box Android puts your app in, and Android can swap the box."
+course: android-internals
+chapter: 1
+lesson: 1
+type: mechanism
+minutes: 20
+prerequisites: []
+objectives:
+  - "Say what a process is and name what lives inside one"
+  - "Explain why your app and its process are not the same thing"
+  - "Predict which values survive when the system replaces the process"
+  - "Recognise the crash reports that mean the process was replaced"
+  - "Answer an interviewer who asks what happens to your app when the system needs memory"
+terms: ["process", "PID", "kernel"]
+verifiedOn: "documentation checked; device transcripts still to capture"
+stage: published
+sources: ["posts/android/linux-for-android-engineers#Your app is a process"]
+---
+
+## You will
+
+- Say what a process is and name what lives inside one
+- Explain why your app and its process are not the same thing
+- Predict which values survive when the system replaces the process
+- Recognise the crash reports that mean the process was replaced
+- Answer an interviewer who asks what happens to your app when the system needs memory
+
+## The question
+
+A user opens your app and types into a form. They press Home, take a photo,
+reply to a message, and come back twenty minutes later.
+
+The screen is right. The text they typed is still in the field.
+
+But the object behind that screen is empty. A user id you set at login is
+null. A `lateinit` throws. On your desk this never happens, not once. In the
+Play Console it happens every day, always on the cheaper phones.
+
+Most Android developers explain it like this:
+
+> The app was still open. I could see it in Recents. So it was still running.
+
+That sentence is what this lesson takes apart.
+
+Here is the picture most developers carry:
+
+```text
+Your app
+   ↓
+open  or  closed
+```
+
+Here is what Android actually does:
+
+```text
+Your app
+   ↓
+a process, created when needed
+   ↓
+ended when the system wants the memory
+   ↓
+a different process, created when
+the user comes back
+```
+
+Nothing in that second chain asks your permission, and nothing in it tells you
+afterwards.
+
+## What is actually happening
+
+### A program is a file. A process is that file running.
+
+Your app is installed as a file. It sits in storage doing nothing at all,
+the same way a `.pdf` sits in storage.
+
+When Android needs to run it, it asks the kernel for a process. The **kernel**
+is the part of Linux that owns memory, CPU time and every running program on
+the phone.
+
+A **process** is one running program together with the memory it owns.
+
+The kernel gives each process a number so it can tell them apart. That number
+is the **process id**, almost always written PID.
+
+The Android documentation says it in one line: "the Android system starts a
+new Linux process for the application with a single thread of execution"
+([Processes and threads overview](https://developer.android.com/guide/components/processes-and-threads)).
+
+### Everything your code makes lives inside that one box
+
+Once your process exists, this is what is in it:
+
+```text
+Process 9871
+ ├── every object you created
+ ├── every singleton and companion object
+ ├── every running thread and coroutine
+ └── every open file handle and socket
+```
+
+None of that is written down anywhere else. It is memory, and memory belongs
+to the process, not to your app.
+
+### The box is not yours
+
+Android lends you the process. It takes it back when it wants the memory.
+
+When memory runs short, the system ranks every process by how much the user
+would notice if it went away, and ends the ones at the bottom. An app the user
+is not looking at sits near the bottom. The guide is blunt about who decides:
+which process dies is "determined by the system through a combination of the
+parts of the application that the system knows are running, how important
+these things are to the user, and how much overall memory is available in the
+system" ([Processes and app lifecycle](https://developer.android.com/guide/components/activities/process-lifecycle)).
+
+Two things follow, and together they are the whole lesson.
+
+**No code of yours runs when the process ends.** Not `onDestroy`, not a
+`finally` block, not a shutdown hook. The process stops existing between one
+instruction and the next.
+
+**The screen survives anyway, because it was saved outside the process.**
+Before your app went to the background, the system had already written down a
+small description of what was on screen. That description is not in your
+memory, so it is still there afterwards.
+
+<Figure src="hero" caption="One app, two processes: the second has a new number and empty memory, and the screen is rebuilt from a description that was kept outside." />
+
+When the user comes back, Android creates a **new** process, with a **new**
+number and empty memory, and rebuilds the screen from that description. Same
+app, same icon, same screen. Different box.
+
+Think of the process as a desk your employer lends you. Your papers are on it.
+When the company needs the desk, it clears it and gives you a different one
+later, along with a photograph of how the desk looked. The analogy stops at
+the photograph. It is small, it only shows what was on the surface, and nobody
+tells you the desk was cleared.
+
+This is why a value kept in a `companion object` reads as never-set while the
+screen the user was looking at comes back exactly right. Lesson 3.2 puts both
+on one screen and watches it happen.
+
+<Check n={1} />
+
+## Connect it to your code
+
+You have written this. Everyone has.
+
+```kotlin
+// data/SessionCache.kt
+object SessionCache {
+    var userId: String? = null
+}
+```
+
+Set it at login, read it from every screen. It works all day on your desk,
+because your desk has plenty of memory and the debugger keeps your app in the
+foreground.
+
+It is memory. In the new process it is null, and the screen that reads it is
+already being drawn.
+
+> Anything you hold in memory is a cache, not storage. If the screen breaks
+> when it is empty, the value has to be written outside the process.
+
+Where a value lives decides whether it comes back:
+
+| Where the value lives | Survives a new process |
+|---|---|
+| `object`, `companion object`, top-level `val` | no |
+| A property in a ViewModel | no |
+| `rememberSaveable`, `SavedStateHandle` | yes, if it is small |
+| DataStore, a file, a row in a database | yes |
+
+The ViewModel row surprises people. A ViewModel survives rotation, which is a
+different event with a different mechanism, and it dies with the process like
+everything else in memory. The official comparison table says the same thing
+([Save UI states](https://developer.android.com/topic/libraries/architecture/saving-states)).
+
+The two rows that say yes are the only two places the system can reach when it
+rebuilds your screen.
+
+<Check n={2} />
+
+## See it on your phone (optional)
+
+You can skip this section. Nothing later in the lesson or the course depends
+on it.
+
+If you have a phone or emulator connected, `adb` is the command-line tool that
+talks to it. Open your app first, then ask the phone which programs are
+running. `ps` lists them, and `grep` keeps only the lines that mention your
+package.
+
+{/* VERIFY: capture all three blocks on the verification device before this leaves draft */}
+
+```bash
+adb shell ps -A | grep firstprinciples
+```
+
+```console
+u0_a412  9871  1284  dev.firstprinciples.android
+```
+
+The second number is the PID. Yours will be different.
+
+Now press Home on the phone, then end the process from your laptop. The system
+will not end a process the user is looking at, which is why Home comes first.
+
+```bash
+adb shell am kill dev.firstprinciples.android
+```
+
+Run the first command again and nothing prints, because there is no process
+left to list. Open the app from the launcher and run it once more:
+
+```console
+u0_a412  10203  1284  dev.firstprinciples.android
+```
+
+Same app, same icon, same screen. A different number in the middle column.
+
+## When it breaks
+
+**A `lateinit` that cannot possibly be uninitialised.**
+
+```console
+kotlin.UninitializedPropertyAccessException: lateinit property userId has not been initialized
+```
+
+You set it at login, and the user is logged in. They are logged in in the new
+process too, because that was written to storage. The property was not.
+
+**"Don't keep activities" says everything is fine.**
+
+The developer option destroys your Activity as soon as it stops. It leaves the
+process alive, so every singleton in it survives and the bug stays hidden. It
+tests Activity recreation, which is a real thing and a different thing. To
+test what this lesson describes, the process has to end.
+
+<Check n={3} />
+
+## Your notes
+
+```text
+PROGRAM  base.apk on disk
+      ↓  user taps the icon
+PROCESS 9871
+      objects, singletons, threads
+      ↓  system needs memory
+PROCESS ENDS
+      none of your code runs
+      ↓  user comes back
+PROCESS 10203
+      empty memory
+      screen rebuilt from saved state
+```
+
+- A process is one running program plus the memory it owns.
+- The PID names the box, not the app.
+- Memory dies with the process. Saved state, files and databases do not.
+- No code of yours runs when the system ends the process.
+- Recents is a list the system keeps, not a list of live processes.
+- A ViewModel survives rotation and dies with the process.
+
+## Interview questions
+
+Answer out loud before you open the model answer. The gap between what you
+thought and what you said is the part worth rereading.
+
+**1. (Easy)** What is the difference between a program and a process?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- A program is a file on disk. It is not running.
+- A process is that program running, with memory the kernel gave it.
+- One program can have more than one process alive at the same time.
+- The kernel identifies a process by a number, the PID.
+
+**A weak answer** says "a process is a running program" and stops. It misses
+the memory, which is the part every consequence in Android comes from.
+</details>
+
+**2. (Easy)** The system replaces your app's process. Name what is gone and
+one thing that is not.
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Gone: every object, every singleton and `companion object`, every thread and
+  coroutine, every open file handle or socket.
+- Not gone: anything written outside the process, which means saved instance
+  state, files, DataStore and the database.
+- The screen comes back because the system saved a description of it outside
+  your process.
+
+**A weak answer** lists "variables" without naming singletons, which is where
+this actually bites in real code.
+</details>
+
+**3. (Medium)** A user fills in a screen, leaves for twenty minutes, and comes
+back. The screen is correct but the user id you set at login is null. Walk me
+through what happened.
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- The app went to the background, so the system ranked it as something the
+  user would not notice losing.
+- Memory ran short and the system ended the process. No code of mine ran.
+- The user id lived in memory, so it went with the process.
+- On return, Android created a new process with empty memory and rebuilt the
+  screen from the saved description.
+- The fix is to read the id from storage, or to hold it in saved state, rather
+  than from a singleton.
+
+**A weak answer** stops at "the app was killed and restarted". It does not say
+where the value lived or why the screen survived, and the second half is what
+the interviewer is listening for.
+</details>
+
+**4. (Medium)** A teammate says the bug cannot be process death, because the
+app was still in Recents. What do you tell them?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Recents is a list the system keeps of tasks the user was doing.
+- It is not a list of running processes, and it outlives them.
+- A card can sit in Recents with no process behind it. Tapping it creates one.
+- To know whether a process exists, ask the system for the process list, not
+  the user interface.
+
+**A weak answer** agrees with the teammate, which is how this bug survives a
+sprint.
+</details>
+
+**5. (Hard)** Why can you not rely on `onDestroy` to save data?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- `onDestroy` is a call the framework makes while your process is alive.
+- When the system ends the process, there is no process left to make that
+  call, so it never happens.
+- It is also late: by the time it would run, the user has already gone.
+- Save when the value changes, or in the callbacks the system makes while the
+  app is still there, not on the way out.
+
+**A weak answer** says "onDestroy is not guaranteed" without saying why. The
+reason is the whole point: there is nothing left to run the code.
+</details>
+
+**6. (Hard)** A tester turns on "Don't keep activities", runs the whole suite,
+and everything passes. Users still report the bug. What did the tester
+actually test?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- That option destroys the Activity as soon as it is stopped.
+- The process stays alive, so every singleton and static in it survives.
+- It tests Activity recreation, which is a real and different failure.
+- To test this one, the process itself has to end, which means killing it from
+  the shell or from the debugger.
+
+**A weak answer** treats the two as the same test, which is the most common
+reason this class of bug ships.
+</details>
+
+**7. (Senior)** Android could keep every app's process alive for as long as
+the phone is on. Why does it not, and what would users notice if it did?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Physical memory is fixed, and phones are sold with far less of it than
+  laptops.
+- If nothing were ever reclaimed, the phone would have to refuse to start new
+  apps, or swap heavily, and both are worse for the user than a restart.
+- So the system ranks processes by how much the user would notice losing them
+  and reclaims from the bottom.
+- The cost of that choice is pushed onto developers: the system keeps the
+  screen, and we keep everything else.
+- Users would notice the camera failing to open while a game they finished an
+  hour ago holds memory.
+
+**A weak answer** says "to save memory" and stops. The interesting half is the
+trade the platform made, and who pays for it.
+</details>
+
+**8. (The one that matters)** Explain a process to an interviewer in four
+sentences, without using the word "basically".
+
+<details>
+<summary>Model answer</summary>
+
+An app is installed as a file, and a process is that file running, with its
+own memory. Everything my code creates lives in that memory: objects,
+singletons, threads. When the system needs memory it ends the process without
+running any of my code, so all of that goes. The screen comes back because the
+system saved a small description of it outside the process and rebuilt it in a
+new process with new memory.
+</details>
+
+## Words you met
+
+| Term | What people say | What it actually means |
+|---|---|---|
+| Process | "the app" | One running program together with the memory it owns. Android gives your app one, and can end it and make another. [Docs](https://developer.android.com/guide/components/processes-and-threads) |
+| PID | "the app's id" | The number the kernel uses to tell one running process from another. It names the box, not the program in it. |
+| Kernel | "Linux" | The part of Linux that owns memory, CPU time and every running program, and decides which processes exist. |
+
+## Go deeper
+
+- [Processes and threads overview](https://developer.android.com/guide/components/processes-and-threads): the paragraph this lesson quotes, plus what happens when you ask for more than one process.
+- [Processes and app lifecycle](https://developer.android.com/guide/components/activities/process-lifecycle): the ranking the system uses when it decides which process to end.
+- [Save UI states](https://developer.android.com/topic/libraries/architecture/saving-states): the table of what survives a rotation and what survives a new process.
+
+**What to skip for now**
+
+- Where your process was copied from, and why that makes startup fast: lesson 1.6.
+- The importance ranking and the numbers behind it: lesson 4.3.
+- Reading `/proc` on the device: not in this course.
+
+## Where this goes next
+
+The process is a box the kernel owns, holding memory nothing else can reach.
+The next lesson asks what that memory actually is, because the phone has one
+memory chip and every app is in it.

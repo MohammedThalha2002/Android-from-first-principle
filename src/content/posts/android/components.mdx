@@ -1,0 +1,241 @@
+---
+title: "Components"
+navTitle: "Components"
+summary: "Context, Application, Fragments, Services, receivers, PendingIntent and providers: what the system can reach into, and the manifest as the contract."
+readingTime: "2 hours"
+minutes: 110
+tags: ["activity","service","broadcastreceiver","contentprovider","manifest","intent filter","implicit intent","deep link","app links","assetlinks","pendingintent","flag immutable","package visibility","queries","aidl","exported","intent redirection","task hijacking"]
+draft: true
+date: "2026-05-09"
+subtopic: "android-internals"
+subtopicOrder: 6
+part: "II"
+verifiedAgainst: "compileSdk 36 · AGP 8.13 · Kotlin 2.3"
+stage: "outline"
+labModule: ":ch06-components"
+sources: ["03-component-model-manifest-and-intents#Four component types and what each is for","03-component-model-manifest-and-intents#The manifest as a contract","03-component-model-manifest-and-intents#PendingIntent","03-component-model-manifest-and-intents#Binder objects you expose","03-component-model-manifest-and-intents#Decision table","03-component-model-manifest-and-intents#Failure modes","03-component-model-manifest-and-intents#Cheat-sheet","04-lifecycle-state-and-process-death#Fragments"]
+---
+A desktop program starts at `main()`. It owns its lifetime, decides what to do, and exits when it is finished.
+
+An Android app has no `main()`, and the reason is chapter 2's first fact: the app does not own its process. The OS starts it — because the user tapped an icon, because a notification was tapped, because another app asked for something your app can do, because a broadcast fired. Since the *system* decides what to start, an app cannot keep its entry points private. It has to **publish** them, in a form the system can read without running your code, and then wait to be called.
+
+That publication is the manifest. The published things are components. The messages that arrive are intents. This chapter is those three ideas and the security surface they create.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Four component types and what each is for
+
+There are exactly four, and the list is that long because it enumerates the ways the system can need to reach into an app.
+
+| Component | It is | The system starts it when |
+|---|---|---|
+| **Activity** | a screen with a window | the user, or another app, needs a UI |
+| **Service** | work with no window | something must run without a screen |
+| **BroadcastReceiver** | a callback for a system or app event | an event you registered for occurs |
+| **ContentProvider** | a Binder-backed data interface | another process queries your data |
+
+Each is a class the system instantiates and calls. You never construct one; you declare it and implement callbacks. That inversion is the whole model.
+
+Two clarifications that prevent a lot of wasted effort. A **Service is not a thread** — it runs on the main thread, and a Service doing work without moving off it is an ANR waiting to happen (ch. 12). And a **ContentProvider is for cross-process data**; using one inside your own app to reach your own database is a Binder round trip to yourself, which is why chapter 15 uses Room directly.
+
+The modern answer to "which component do I need" is very often *none of them*. The four components are entry points from outside. Work that happens while your app is already running belongs in a coroutine (ch. 12), durable background work in WorkManager (ch. 9), and moving between screens in Navigation (ch. 7) rather than in new Activities. The decision table at the end of this chapter says so explicitly.
+
+## The manifest as a contract
+
+`AndroidManifest.xml` is not configuration. It is a **declaration read by the system before your code runs**, and that ordering explains most of its rules.
+
+The package manager parses it at install time (ch. 2) to decide what your app is allowed to do and what it can be asked to do. Nothing in it can depend on runtime state, because there is no runtime yet.
+
+What it declares:
+
+- **Components** — every Activity, Service, Receiver and Provider the system may start, with the intent filters that describe what each responds to.
+- **Permissions** — what you request, and what you require of callers.
+- **Features** — hardware and software you need, which Play uses to filter devices.
+- **`queries`** — which other packages you can see at all (below).
+- **Per-component attributes** — `exported`, `launchMode`, `screenOrientation`, `configChanges`, `process`.
+
+`android:exported` is the one to get right. It declares whether components *outside your app* may start this one. Since Android 12 <ApiLevel changedIn="31" /> any component with an intent filter must declare it explicitly — the build fails otherwise — because the old default of "exported if it has a filter" surprised too many people into publishing an internal screen to every app on the device.
+
+`android:process` moves a component to a separate process. It is occasionally right (an isolated crash-prone parser, a large short-lived task) and usually wrong: a second process means a second `Application.onCreate`, no shared memory, and every interaction between them crossing Binder.
+
+### Manifest merging, and the permission you did not add
+
+Your manifest is not the manifest that ships. AAPT2 merges yours with the manifest of **every library**, transitively (ch. 2). A dependency can therefore add a permission, a component or a provider to your app without a line of your code changing.
+
+```
+$ apkanalyzer manifest print app-release.apk | grep uses-permission
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="com.google.android.gms.permission.AD_ID" />
+```
+
+The third one is not yours. Play requires it to be declared in your Data Safety form regardless (ch. 10), and users see it. The merged manifest — not your source file — is the truth, and reading it should be part of reviewing any dependency bump.
+
+`tools:node="remove"` removes a merged element and `tools:replace` overrides an attribute, but the first move is to understand why the library wanted it.
+
+## PendingIntent
+
+A `PendingIntent` is not an intent. It is **a token that lets another process perform an action as you**, with your identity and your permissions, at a time you do not control.
+
+<Diagram
+  caption="A PendingIntent hands your identity to another process. The system performs the action as your app — which is why a mutable one is a capability you have given away."
+  label="Diagram showing your app creating a PendingIntent and handing it to the system, which later fires it back as your app with your UID and permissions; a mutable PendingIntent lets the holder alter the intent before it is fired."
+>
+  <svg viewBox="0 0 660 224" width="660" height="224">
+    <rect x="10" y="34" width="180" height="72" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="100" y="58" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">your app</text>
+    <text x="100" y="76" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">creates the token,</text>
+    <text x="100" y="90" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">then may exit entirely</text>
+
+    <rect x="240" y="34" width="180" height="72" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="330" y="58" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">holder</text>
+    <text x="330" y="76" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">notification shade,</text>
+    <text x="330" y="90" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">alarm manager, widget</text>
+
+    <rect x="470" y="34" width="180" height="72" rx="8" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="560" y="58" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">fired AS YOU</text>
+    <text x="560" y="76" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">your UID, your</text>
+    <text x="560" y="90" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">permissions, later</text>
+
+    <path d="M190 70h50M420 70h50" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M232 64 L240 70 L232 76" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M462 64 L470 70 L462 76" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <rect x="240" y="132" width="180" height="46" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="330" y="150" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">MUTABLE?</text>
+    <text x="330" y="166" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">the holder can edit it first</text>
+    <path d="M330 106 L330 132" fill="none" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <text x="330" y="204" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">FLAG IMMUTABLE unless you have a specific reason; required since Android 12.</text>
+  </svg>
+</Diagram>
+
+Since Android 12 <ApiLevel changedIn="31" /> you must specify `FLAG_IMMUTABLE` or `FLAG_MUTABLE` — creating one without either throws. Default to immutable. A mutable `PendingIntent` handed to another process lets that process fill in the blanks and have your app perform the result, which is a privilege-escalation primitive (ch. 10).
+
+```kotlin
+val open = PendingIntent.getActivity(
+    context, articleId.hashCode(),
+    Intent(context, DetailActivity::class.java).putExtra("id", articleId.raw),
+    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+)
+```
+
+The **request code** is the identity. Two `PendingIntent`s with the same request code and an intent that is *equal* (action, data, type, class and categories — **extras are not compared**) are the same token. That last detail causes a specific bug: five notifications built with request code `0` and different extras are one `PendingIntent`, so every notification opens the same article. Give each a distinct request code, as above.
+
+`FLAG_UPDATE_CURRENT` replaces the extras of an existing token; `FLAG_CANCEL_CURRENT` invalidates and recreates it.
+
+## Binder objects you expose
+
+Everything so far is one-shot messaging. When another process needs an ongoing conversation, you expose a Binder object — chapter 2's mechanism, now from the serving side.
+
+**Bound service.** `bindService` returns an `IBinder`; the client calls methods on it. Within one app, `Binder` with a direct cast is enough because there is no process boundary.
+
+**AIDL** generates the marshalling for a genuine cross-process interface. Two rules that follow from chapter 2: your methods run on a **Binder thread pool thread**, not the main thread, so shared state needs synchronising; and arguments and returns are subject to the transaction buffer, so no large payloads.
+
+**Messenger** is a `Handler` behind a Binder — serialised onto one thread, much simpler than AIDL, and the right choice when you do not need concurrency.
+
+**ContentProvider** is the right cross-app data API when the consumer expects a queryable table and URI-based permission grants. `grantUriPermissions` with `FLAG_GRANT_READ_URI_PERMISSION` gives another app temporary access to one item, which is how sharing a file with a camera app works without making the file world-readable — see `FileProvider` in chapter 15.
+
+## Decision table
+
+The most useful thing in this chapter. "I need to do X" → what to actually use.
+
+| I need to | Use | Not |
+|---|---|---|
+| Show another screen in my app | Navigation (ch. 7) | a new Activity per screen |
+| Do work while the user is on the screen | a coroutine in `viewModelScope` (ch. 12) | a Service |
+| Do work that must survive the app closing | WorkManager (ch. 9) | a Service, an AlarmManager alarm |
+| Show ongoing user-visible work | a foreground service (ch. 9) | a background Service |
+| Run at an exact wall-clock time | AlarmManager with the exact-alarm permission (ch. 9) | WorkManager |
+| React to a server event | FCM (ch. 9) | polling |
+| React to a system event while running | a runtime-registered receiver | a manifest receiver |
+| React to a system event while not running | a manifest receiver, if still allowed | assuming implicit broadcasts work |
+| Share data with another app | a `ContentProvider`, or `FileProvider` for files | world-readable files |
+| Let another app act for me later | a `PendingIntent`, immutable | a mutable one |
+| Read my own database | Room directly (ch. 15) | a `ContentProvider` |
+
+The pattern: the four components are for **being reached from outside**. Inside your own app, in 2026, you almost always want something else.
+
+## Failure modes: Components & intents
+
+**`ActivityNotFoundException` in production, never in development.** *Symptom:* a crash on "open in maps" or "share", concentrated on certain devices. *Cause:* no app handles the intent, or package visibility hides the one that does. *Fix:* wrap `startActivity` in a `try`/`catch` with a user-visible fallback; add a `queries` entry if you must resolve first.
+
+**Deep links work in debug, open a browser in production.** *Symptom:* App Links verified locally, unverified from Play. *Cause:* `assetlinks.json` lists your upload key rather than the Play App Signing key. *Fix:* take the fingerprint from Play Console, then confirm with `adb shell pm get-app-links`.
+
+**Every notification opens the same item.** *Symptom:* five notifications, all deep-linking to whichever arrived first. *Cause:* one request code, and `PendingIntent` equality ignores extras. *Fix:* a distinct request code per item, plus `FLAG_UPDATE_CURRENT`.
+
+**A permission you never requested appears on the store listing.** *Symptom:* a Data Safety review flags something absent from your source. *Cause:* a library's manifest merged into yours. *Fix:* `apkanalyzer manifest print` on the release artifact; `tools:node="remove"` only once you understand why it was added.
+
+**Code that enumerated packages returns nothing on Android 11+.** *Symptom:* `queryIntentActivities` empty, `NameNotFoundException` for an installed app. *Cause:* package visibility filtering. *Fix:* declare `queries`.
+
+**An exported Activity is used to reach a screen behind your login.** *Symptom:* a security report, or an unexpected deep link into an authenticated area. *Cause:* `exported="true"` on a component that trusts its extras. *Fix:* set `exported="false"`, validate every extra, and never `startActivity` an intent you received.
+
+## Cheat-sheet: Components & intents
+
+```bash
+# what does the shipped manifest actually say
+apkanalyzer manifest print app-release.apk
+adb shell dumpsys package <pkg> | sed -n '/Activity Resolver Table/,/^$/p'
+
+# App Links
+adb shell pm get-app-links <pkg>                       # verification state per domain
+adb shell pm verify-app-links --re-verify <pkg>        # ask for another attempt
+curl https://example.com/.well-known/assetlinks.json    # what the device will fetch
+
+# fire an implicit intent by hand
+adb shell am start -a android.intent.action.VIEW -d "https://example.com/a/42"
+adb shell am start -n <pkg>/.DetailActivity --es id 42  # explicit, with an extra
+
+# which components are exported
+adb shell dumpsys package <pkg> | grep -A3 "exported=true"
+```
+
+```xml
+<!-- the four attributes worth checking on every component -->
+<activity
+    android:name=".DetailActivity"
+    android:exported="true"          <!-- required if it has a filter -->
+    android:launchMode="standard"    <!-- anything else needs a reason -->
+    android:configChanges="" />      <!-- empty: let it recreate (ch. 5) -->
+```
+
+<LabCard module=":ch03-components">
+Publish an implicit-intent handler and a verified App Link, and confirm both with `adb shell am start` and `pm get-app-links`. Then break it deliberately: put the wrong certificate fingerprint in `assetlinks.json`, re-verify, and read the failure state from adb — that is the exact signal you will need when links stop opening in production. Finally, add an exported Activity that starts an intent from its own extras, exploit it from a second app, and fix it.
+</LabCard>
+
+## Fragments
+
+Fragments have **two lifecycles**, and conflating them is the source of a specific, very common leak.
+
+The **Fragment** lives from `onCreate` to `onDestroy`. Its **View** lives from `onCreateView` to `onDestroyView` — and the view can be destroyed and recreated *while the Fragment instance survives*, which is exactly what happens when you navigate forward and come back, or when the Fragment goes onto the back stack.
+
+So a Fragment can outlive several of its own views. Hold a reference to a view in a Fragment field and the view leaks; observe a `LiveData` with the *Fragment* as the owner and, on return, you have two observers updating a view that no longer exists.
+
+```kotlin
+class FeedFragment : Fragment(R.layout.feed) {
+    private var _binding: FeedBinding? = null
+    private val binding get() = _binding!!          // valid only between the two below
+
+    override fun onViewCreated(view: View, s: Bundle?) {
+        _binding = FeedBinding.bind(view)
+        // viewLifecycleOwner, NOT this — scoped to the VIEW, not the Fragment
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.state.collect(::render)
+            }
+        }
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null                              // the leak fix
+    }
+}
+```
+
+`viewLifecycleOwner` is the answer to almost every Fragment question. Anything touching the view is scoped to it.
+
+**State loss** is the other classic. Committing a transaction after `onSaveInstanceState` throws `IllegalStateException: Can not perform this action after onSaveInstanceState` — because the state was already written and your change would be silently lost on restore. `commitAllowingStateLoss` suppresses the exception, not the problem; the fix is not to commit from an async callback that may land after the Activity has been backgrounded.
+
+`setFragmentResult` is the supported way to pass a result back, and it survives process death because the result is stored in the `FragmentManager`'s saved state.

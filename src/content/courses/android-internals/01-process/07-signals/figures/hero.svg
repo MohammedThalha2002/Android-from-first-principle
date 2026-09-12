@@ -1,0 +1,59 @@
+<svg viewBox="0 0 700 320" role="img" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="dg-arrow-s" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-line)"/>
+    </marker>
+    <marker id="dg-arrow-k" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-warn)"/>
+    </marker>
+  </defs>
+
+  <g data-part="kernel">
+    <rect x="16" y="122" width="140" height="70" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="86" y="150" text-anchor="middle" font-family="var(--font-ui)" font-size="13" fill="var(--dg-label)">kernel</text>
+    <text x="86" y="170" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">delivers a signal</text>
+  </g>
+
+  <g data-part="process">
+    <rect x="246" y="34" width="200" height="248" rx="10" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="346" y="60" text-anchor="middle" font-family="var(--font-ui)" font-size="13" fill="var(--dg-label)">your process</text>
+  </g>
+
+  <g data-part="code">
+    <rect x="264" y="76" width="164" height="34" rx="5" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="346" y="98" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">your code, running</text>
+  </g>
+
+  <g data-part="sigquit">
+    <path d="M158 140 C 200 118 210 104 240 96" fill="none" stroke="var(--dg-line)" stroke-width="2" marker-end="url(#dg-arrow-s)"/>
+    <text x="166" y="110" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">SIGQUIT 3</text>
+    <text x="166" y="126" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">can be caught</text>
+  </g>
+
+  <g data-part="sigkill">
+    <path d="M158 176 C 200 202 210 220 240 236" fill="none" stroke="var(--dg-warn)" stroke-width="2" marker-end="url(#dg-arrow-k)"/>
+    <text x="166" y="216" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">SIGKILL 9</text>
+    <text x="166" y="232" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">cannot be caught</text>
+  </g>
+
+  <g data-part="dump">
+    <rect x="496" y="56" width="188" height="72" rx="8" fill="var(--dg-fill)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="590" y="82" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">what every thread</text>
+    <text x="590" y="100" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">is doing right now</text>
+    <text x="590" y="118" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">this is the ANR report</text>
+    <path d="M450 92 H 488" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-s)"/>
+  </g>
+
+  <g data-part="continues">
+    <rect x="496" y="138" width="188" height="34" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="590" y="160" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">and the process carries on</text>
+  </g>
+
+  <g data-part="gone">
+    <rect x="496" y="212" width="188" height="72" rx="8" fill="var(--dg-fill)" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <text x="590" y="238" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-warn)">stopped between</text>
+    <text x="590" y="256" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-warn)">two instructions</text>
+    <text x="590" y="274" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">none of your code runs</text>
+    <path d="M450 248 H 488" fill="none" stroke="var(--dg-warn)" stroke-width="1.5" marker-end="url(#dg-arrow-k)"/>
+  </g>
+</svg>

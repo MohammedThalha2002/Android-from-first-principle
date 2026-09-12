@@ -1,0 +1,351 @@
+---
+title: "Virtual memory: why every process thinks it owns the machine"
+motto: "Every address your code sees is made up. The kernel decides what it really points at."
+course: android-internals
+chapter: 1
+lesson: 2
+type: mechanism
+minutes: 25
+prerequisites: ["1.1"]
+objectives:
+  - "Say what a virtual address is and why your code never sees a real one"
+  - "Explain what the MMU and the page table do on every memory access"
+  - "Explain why two apps can hold the same address and not collide"
+  - "Say what process isolation actually consists of"
+  - "Read the two memory columns in a process list without confusing them"
+terms: ["virtual memory", "page", "page table", "MMU"]
+verifiedOn: "documentation checked; device transcripts still to capture"
+stage: published
+---
+
+## You will
+
+- Say what a virtual address is and why your code never sees a real one
+- Explain what the MMU and the page table do on every memory access
+- Explain why two apps can hold the same address and not collide
+- Say what process isolation actually consists of
+- Read the two memory columns in a process list without confusing them
+
+## The question
+
+The last lesson said your process has its own memory and nothing else can see
+it. That is the sentence everyone repeats.
+
+There is one memory chip in the phone. WhatsApp is in it, your app is in it,
+and so are ninety background processes. Nothing about a single chip separates
+anything.
+
+So what is actually keeping them apart? The usual answer:
+
+> Each app gets its own chunk of RAM.
+
+That would mean the system hands out regions and every app politely stays
+inside its own. Nothing stops a wrong pointer from wandering out of a region,
+so that cannot be it.
+
+What most developers picture:
+
+```text
+RAM
+ ├── WhatsApp's chunk
+ ├── Instagram's chunk
+ └── your app's chunk
+```
+
+What is actually there:
+
+```text
+your app asks for 0x7f2a01
+        ↓  the MMU looks it up
+your process's page table
+        ↓
+physical location 0x1c400
+```
+
+Another app asking for the same `0x7f2a01` gets sent somewhere else entirely,
+and neither of them can tell.
+
+## What is actually happening
+
+### Every address your code sees is made up
+
+Your app never names a real location in memory. Every pointer, every object
+reference, every address in a stack trace is a **virtual address**: a number in
+a space the kernel invented for your process and nobody else.
+
+That space is the same shape for every process. Two apps can both hold
+something at what they each call address `0x7f2a01`, and both are telling the
+truth about their own space.
+
+### Hardware translates it, on every single access
+
+Part of the CPU called the **memory management unit**, or MMU, sits between
+your instructions and the memory. Every read and every write goes through it.
+It takes the virtual address your code used and produces the physical location
+to actually touch.
+
+It does this from a table the kernel keeps for whichever process is currently
+running. That table is the **page table**.
+
+### The unit of translation is a page
+
+Memory is not mapped one byte at a time. It is divided into fixed-size blocks
+called **pages**, typically four kilobytes each. The page table has one entry
+per page of your process, and each entry says where that page physically lives.
+
+Two pages that sit next to each other in your process can be nowhere near each
+other in the chip. Your code cannot tell, and does not need to.
+
+<Figure src="hero" caption="Two processes using the same virtual address, two page tables, and two different physical pages. Neither process has an entry for the other's memory." />
+
+### Isolation is a missing entry, not a check
+
+Here is the part worth carrying out of this lesson.
+
+Your page table contains entries for your pages. It contains no entry pointing
+at another app's memory. So there is no number you could put in a pointer that
+would reach it. Not a number you are not allowed to use: a number that does not
+exist in your space.
+
+Process isolation is not a guard checking each access. It is the absence of any
+way to express the request.
+
+Think of it as every process being handed its own index, where entry 12 names a
+different real shelf than entry 12 in anybody else's index. The analogy stops in
+one place that matters: you cannot walk past the index and reach the shelves
+yourself, because the MMU is the only path and it only reads your index.
+
+This is what makes lesson 1.6 possible, where two processes point at one
+physical page on purpose, and it is half of why switching between processes
+costs more than switching between threads, which is the next lesson but one.
+
+<Check n={1} />
+
+## Connect it to your code
+
+You have seen this without knowing it. Here are two numbers your app reports.
+
+```kotlin
+// debug/MemoryReadout.kt
+val runtime = Runtime.getRuntime()
+val used = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+val limit = runtime.maxMemory() / 1024 / 1024
+```
+
+`maxMemory` is not the phone's memory. It is a per-app cap the runtime applies
+to your heap, and it is usually a small fraction of the device's memory. An app
+can run out while the phone has a gigabyte free.
+
+> Your process has an enormous address space and a small amount of real memory
+> inside it. Almost every confusing memory number comes from mixing the two up.
+
+The same split explains the columns in a process list:
+
+| Column | What it counts | Useful? |
+|---|---|---|
+| VSZ | every virtual address the process has mapped | almost never: it is address space, not memory |
+| RSS | the physical pages actually resident for it | yes, though shared pages are counted in full |
+
+An app showing several gigabytes of VSZ is not using several gigabytes. It has
+reserved address space, which is free, because addresses are made up.
+
+<Check n={2} />
+
+## See it on your phone (optional)
+
+You can skip this. Nothing later depends on it.
+
+This is the same command as the first lesson, read differently. The fourth and
+fifth columns are the two numbers above.
+
+{/* VERIFY: capture on the verification device before this leaves draft */}
+
+```bash
+adb shell ps -A | grep firstprinciples
+```
+
+```console
+u0_a412  9871  1284  14251848  198432  0  0  S  dev.firstprinciples.android
+```
+
+The fourth number is virtual, in kilobytes, and it is enormous. The fifth is
+what is actually resident. Both will be different on your device, and the gap
+between them is the whole lesson.
+
+## When it breaks
+
+**Reporting VSZ as memory use.**
+
+A dashboard that graphs the fourth column shows every app using many gigabytes
+on a phone that has eight. Nothing is wrong with the phone. The graph is
+counting addresses, and addresses are not a scarce resource.
+
+**Running out of memory on a device with memory free.**
+
+```console
+java.lang.OutOfMemoryError: Failed to allocate a 4194320 byte allocation
+with 1048576 free bytes and 1024KB until OOM
+```
+
+The limit in that message is your app's heap cap, not the device's memory. The
+phone can have plenty left. Lesson 3.4 is about the heap that this cap applies
+to.
+
+<Check n={3} />
+
+## Your notes
+
+```text
+your code: 0x7f2a01
+        ↓  every access
+      MMU
+        ↓  reads
+ your page table
+        ↓
+physical page in RAM
+
+another process: same 0x7f2a01
+        ↓  its own page table
+a different physical page
+
+no entry for other apps
+        ↓
+no way to name their memory
+        = isolation
+```
+
+- Every address your code uses is virtual, invented for your process.
+- The MMU translates on every access, using your process's page table.
+- Memory is mapped in pages, typically four kilobytes at a time.
+- Two processes can use the same virtual address and land in different places.
+- Isolation is the absence of an entry, not a guard on each access.
+- Address space is free. Resident pages are not. Do not confuse the two.
+
+## Interview questions
+
+Answer out loud first, then open the model answer.
+
+**1. (Easy)** What is a virtual address?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- A number in an address space the kernel created for one process.
+- It is not a location in physical memory.
+- Every address the app's code ever sees is one of these.
+- The translation to a real location happens in hardware on every access.
+
+**A weak answer** says it is "memory the OS gives the app", which does not
+distinguish the address from the memory and loses the whole idea.
+</details>
+
+**2. (Easy)** WhatsApp holds an object at `0x7f2a01` and your app holds a
+different object at `0x7f2a01`. How does the CPU know which memory to touch?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Each process has its own page table, maintained by the kernel.
+- The MMU uses the table belonging to whichever process is currently running.
+- The same virtual address therefore resolves to different physical pages.
+- Neither process can detect that the other exists from this.
+
+**A weak answer** says the OS keeps them apart. The question is how, and the
+answer is a per-process table plus hardware that reads it.
+</details>
+
+**3. (Medium)** What exactly is process isolation made of?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Each process has its own page table with entries only for its own pages.
+- There is no entry that reaches another process's memory.
+- So it is not that access is refused. There is no address that would express
+  the request.
+- Anything genuinely shared has to be mapped in deliberately by the kernel.
+
+**A weak answer** describes a permission check. A check implies a request that
+can be made and denied, and here the request cannot be formed.
+</details>
+
+**4. (Medium)** Why does memory get mapped in pages rather than byte by byte?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- A table with one entry per byte would be larger than the memory it describes.
+- A fixed block size keeps the table small and the hardware lookup fast.
+- Four kilobytes is the common size, so one entry covers a useful amount.
+- It also gives a natural unit for sharing and for copying on write later.
+
+**A weak answer** treats the page size as arbitrary. It is the trade between
+table size and wasted space inside a block.
+</details>
+
+**5. (Hard)** Your app throws `OutOfMemoryError` on a phone with two gigabytes
+free. Explain how both facts are true.
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- The runtime applies a heap cap per app, well below the device's memory.
+- The error is about crossing that cap, not about the device being full.
+- The cap exists so one app cannot starve the rest of the system.
+- The device having memory free is what lets other apps keep running while
+  yours fails.
+
+**A weak answer** concludes the device is out of memory, which sends you
+optimising the wrong thing entirely.
+</details>
+
+**6. (The one that matters)** Explain virtual memory to an interviewer in four
+sentences.
+
+<details>
+<summary>Model answer</summary>
+
+Every address a process uses is a virtual address, a number in a space the
+kernel made for that process alone. On every read and write the memory
+management unit translates it into a physical location, using a page table the
+kernel keeps for whichever process is running. Memory is mapped in fixed blocks
+called pages, so the table holds one entry per page rather than per byte. Two
+processes can hold the same virtual address and land on different physical
+pages, and neither has any entry that reaches the other's memory, which is what
+process isolation actually is.
+</details>
+
+## Words you met
+
+| Term | What people say | What it actually means |
+|---|---|---|
+| Virtual memory | "the app's memory" | An address space the kernel invents for each process. Every address your code sees belongs to it, and none of them are physical locations. |
+| Page | "a block of memory" | The fixed-size unit memory is mapped in, typically four kilobytes. One page table entry describes one page. |
+| Page table | "how the OS tracks memory" | The per-process table mapping each of its pages to a physical location. The kernel writes it; the hardware reads it. |
+| MMU | "the memory controller" | The part of the CPU that translates a virtual address to a physical one on every access, by reading the current process's page table. |
+
+## Go deeper
+
+- [Overview of memory management](https://developer.android.com/topic/performance/memory-overview): how Android describes paging, sharing and what is counted against an app.
+
+**What to skip for now**
+
+- Two processes deliberately sharing a physical page: lesson 1.6.
+- Why swapping the page table makes a process switch expensive: lesson 1.4.
+- The heap, the garbage collector, and what the heap cap applies to: lesson 3.4.
+- Page faults, translation caches and memory-mapped files: not in this course.
+
+## Where this goes next
+
+One process, one address space, one page table. The next lesson goes inside
+that space and finds several threads running through it at the same time.

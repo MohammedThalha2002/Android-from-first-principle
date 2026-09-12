@@ -1,0 +1,382 @@
+@import './tokens.css';
+
+/* ==========================================================================
+   Base: the app shell and the shared component vocabulary.
+
+   Layout classes: .app · .chrome-bar · .canvas · .page
+   Components:     .card (+ .card-head[data-tint]) · .chip · .stat · .btn ·
+                   .pill-nav · .crumbs · .row-list · .pct · .eyebrow
+   Everything colours itself through tokens. The chrome family points at the
+   themed surfaces, so the bar changes with the page rather than framing it.
+   ========================================================================== */
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html {
+  background: var(--chrome);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-body);
+  -webkit-font-smoothing: antialiased;
+  scroll-behavior: smooth;
+}
+
+body { margin: 0; min-width: 320px; font-size: var(--text-base); }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.16em; }
+
+button, input, select, textarea { font: inherit; color: inherit; }
+
+:focus-visible { outline: none; box-shadow: var(--ring); border-radius: var(--radius-sm); }
+
+h1, h2, h3, h4 { margin: 0; font-weight: var(--weight-bold); letter-spacing: var(--tracking-tight); line-height: var(--leading-tight); text-wrap: balance; }
+p { margin: 0; }
+
+/* ---- the shell ---------------------------------------------------------- */
+
+.app {
+  display: grid;
+  grid-template-rows: var(--chrome-bar) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+/* Top bar. Dark in both themes. */
+/* The bar's contents sit on the same measure as .page, so the wordmark lines
+   up with the content under it instead of hugging the window edge. The white
+   ground behind it comes from html and still spans the full width. */
+.chrome-bar {
+  align-items: center;
+  color: var(--chrome-ink);
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  height: var(--chrome-bar);
+  margin: 0 auto;
+  max-width: 1280px;
+  padding: 0 clamp(var(--space-4), 3vw, var(--space-6));
+  width: 100%;
+}
+
+.brand {
+  align-items: center;
+  color: var(--chrome-ink);
+  display: inline-flex;
+  font-size: var(--text-base);
+  font-weight: var(--weight-bold);
+  gap: var(--space-2);
+  letter-spacing: var(--tracking-tight);
+  min-width: 0;
+}
+.brand:hover { text-decoration: none; }
+.brand-mark {
+  background: var(--chrome-active);
+  border-radius: var(--radius-sm);
+  color: var(--chrome-active-ink);
+  display: inline-grid;
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
+  height: 1.375rem;
+  letter-spacing: 0;
+  place-items: center;
+  width: 1.375rem;
+}
+.brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Navigation in the bar. A segmented control is app furniture; this is the
+   header of a reading site, so the links are text and the current one is
+   marked in full ink with a rule in the section's accent under it. */
+.pill-nav { display: inline-flex; gap: var(--space-2); }
+.pill-nav a {
+  border-bottom: 2px solid transparent;
+  color: var(--chrome-ink-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: 1;
+  padding: 0.35rem 0.5rem;
+  white-space: nowrap;
+}
+.pill-nav a:hover { color: var(--chrome-ink); text-decoration: none; }
+.pill-nav a[aria-current='page'] {
+  border-bottom-color: var(--accent);
+  color: var(--chrome-ink);
+  font-weight: var(--weight-semibold);
+}
+
+.chrome-actions { align-items: center; display: flex; gap: var(--space-2); justify-content: end; min-width: 0; }
+
+/* Icon button in the chrome (bell, account). */
+.chrome-btn {
+  align-items: center;
+  background: var(--chrome-2);
+  border: 1px solid var(--chrome-line);
+  border-radius: var(--radius);
+  color: var(--chrome-ink);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  gap: var(--space-2);
+  height: 2.125rem;
+  line-height: 1;
+  padding: 0 0.75rem;
+}
+.chrome-btn:hover { background: var(--chrome-line); text-decoration: none; }
+.chrome-btn[disabled] { cursor: default; opacity: 0.55; }
+
+/* Below this width the three chrome groups cannot share one row: the brand,
+   the nav pills and the actions collided and overlapped. Named grid areas
+   rather than flex `order`, because with wrapping flex the line a reordered
+   item lands on is not obvious — and got it wrong once. The pills drop to a
+   second line rather than being hidden; they are the only navigation. */
+@media (max-width: 800px) {
+  .app { grid-template-rows: auto minmax(0, 1fr); }
+  .chrome-bar {
+    grid-template-areas: "brand actions" "nav nav";
+    grid-template-columns: minmax(0, 1fr) auto;
+    height: auto;
+    padding: var(--space-3) var(--space-4);
+    row-gap: var(--space-3);
+    width: 100%;
+  }
+  .chrome-bar .brand { grid-area: brand; min-width: 0; }
+  .chrome-bar .chrome-actions { grid-area: actions; }
+  .chrome-bar .pill-nav {
+    grid-area: nav;
+    justify-content: flex-start;
+    /* The three pills are wider than a small phone, so they scroll inside the
+       bar rather than pushing the whole page sideways. */
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .chrome-bar .pill-nav::-webkit-scrollbar { display: none; }
+  .chrome-bar .pill-nav a { padding: 0.35rem 0.4rem; }
+}
+@media (max-width: 420px) {
+  /* The account label is the least load-bearing text in the bar. */
+  .chrome-btn .chrome-btn-label { display: none; }
+  .chrome-btn { padding: 0 0.5rem; }
+}
+
+/* The canvas: the themed panel below the chrome bar, with the dot grid from
+   the reference. Rounded along its top edge so the dark bar reads as a bar
+   sitting above a panel rather than a band painted across it. */
+.canvas {
+  background-color: var(--canvas);
+  background-image: radial-gradient(var(--dot) 1px, transparent 1px);
+  background-size: 18px 18px;
+  border-radius: var(--radius-canvas) var(--radius-canvas) 0 0;
+  min-width: 0;
+  overflow: clip;
+}
+
+.page {
+  margin: 0 auto;
+  max-width: 1280px;
+  padding: var(--space-5) clamp(var(--space-4), 3vw, var(--space-6)) var(--space-8);
+}
+.page-head { align-items: end; display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-4); justify-content: space-between; margin-bottom: var(--space-5); }
+.page-head h1 { font-size: var(--text-2xl); }
+.page-head p { color: var(--ink-2); max-width: 60ch; }
+
+/* ---- vocabulary --------------------------------------------------------- */
+
+.eyebrow {
+  color: var(--ink-3);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+.muted { color: var(--ink-2); }
+.faint { color: var(--ink-3); }
+.num { font-variant-numeric: tabular-nums; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  min-width: 0;
+}
+.card-body { padding: var(--space-4) var(--space-5); }
+/* A card you read prose inside: wider padding than card-body, because a
+   reading column needs air on both sides. Used by posts, lessons, course and
+   chapter pages, which is why it lives here rather than in one layout. */
+.reading { padding: var(--space-5) clamp(var(--space-4), 3vw, var(--space-7)) var(--space-6); }
+.card-title { font-size: var(--text-lg); font-weight: var(--weight-bold); }
+.card-sub { color: var(--ink-2); font-size: var(--text-sm); margin-top: 2px; }
+.card-row { align-items: center; display: flex; gap: var(--space-3); justify-content: space-between; }
+
+/* A tinted head on a card — the coral "Due today", the lavender "Grammar"
+   in the reference. The tint is a surface, so its text takes the tint ink. */
+.card-head {
+  align-items: center;
+  background: var(--card-2);
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  display: flex;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+  gap: var(--space-3);
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-5);
+}
+.card-head[data-tint] { border-bottom-color: transparent; }
+[data-tint='green']  { background: var(--tint-green);  color: var(--tint-green-ink); }
+[data-tint='coral']  { background: var(--tint-coral);  color: var(--tint-coral-ink); }
+[data-tint='violet'] { background: var(--tint-violet); color: var(--tint-violet-ink); }
+[data-tint='blue']   { background: var(--tint-blue);   color: var(--tint-blue-ink); }
+[data-tint='amber']  { background: var(--tint-amber);  color: var(--tint-amber-ink); }
+[data-tint='teal']   { background: var(--tint-teal);   color: var(--tint-teal-ink); }
+[data-tint='grey']   { background: var(--tint-grey);   color: var(--tint-grey-ink); }
+[data-tint='accent'] { background: var(--accent-bg);   color: var(--accent); }
+
+/* Chips: tags and statuses. Colour comes from data-tint or data-status. */
+.chip {
+  align-items: center;
+  background: var(--tint-grey);
+  border-radius: var(--radius-pill);
+  color: var(--tint-grey-ink);
+  display: inline-flex;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  gap: 0.3rem;
+  line-height: 1;
+  padding: 0.3rem 0.6rem;
+  white-space: nowrap;
+}
+.chip[data-status='new'] { background: var(--status-new); color: var(--status-new-ink); }
+.chip-dot { background: currentColor; border-radius: var(--radius-pill); height: 0.4rem; width: 0.4rem; }
+
+/* Percentage badge coloured by how far along it is (the 60% / 85% / 10%
+   badges in the reference). */
+.pct { border-radius: var(--radius-sm); font-size: var(--text-xs); font-weight: var(--weight-bold); padding: 0.2rem 0.4rem; }
+.pct[data-band='low']  { background: var(--tint-amber); color: var(--tint-amber-ink); }
+.pct[data-band='mid']  { background: var(--tint-blue);  color: var(--tint-blue-ink); }
+.pct[data-band='high'] { background: var(--tint-green); color: var(--tint-green-ink); }
+.pct[data-band='none'] { background: var(--tint-grey);  color: var(--tint-grey-ink); }
+
+/* Stat tile. */
+.stat { display: grid; gap: var(--space-2); }
+.stat-label { align-items: center; display: flex; font-size: var(--text-sm); font-weight: var(--weight-bold); gap: var(--space-2); justify-content: space-between; }
+.stat-value { font-size: var(--text-2xl); font-weight: var(--weight-bold); letter-spacing: var(--tracking-tight); line-height: 1; }
+.stat-value small { color: var(--ink-3); font-size: 0.55em; font-weight: var(--weight-semibold); }
+.stat-sub { color: var(--ink-2); font-size: var(--text-sm); }
+
+/* Buttons. --accent is the group inside a group, the platform elsewhere. */
+.btn {
+  align-items: center;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--accent-ink);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+  gap: var(--space-2);
+  justify-content: center;
+  line-height: 1;
+  padding: 0.6rem 0.9rem;
+  white-space: nowrap;
+}
+.btn:hover { filter: brightness(0.94); text-decoration: none; }
+.btn-ghost { background: var(--card); border-color: var(--line-2); color: var(--ink); }
+.btn-ghost:hover { background: var(--card-2); filter: none; }
+.btn-sm { padding: 0.45rem 0.7rem; font-size: var(--text-xs); }
+.btn[disabled] { cursor: default; opacity: 0.55; }
+
+/* Breadcrumbs. */
+.crumbs { align-items: center; color: var(--ink-3); display: flex; flex-wrap: wrap; font-size: var(--text-xs); gap: var(--space-2); margin-bottom: var(--space-3); }
+.crumbs a { color: var(--ink-3); }
+.crumbs a:hover { color: var(--ink); }
+.crumbs span[aria-current] { color: var(--ink-2); font-weight: var(--weight-semibold); }
+
+/* Row list: group and subtopic post rows. */
+.row-list { display: grid; }
+.row-list > * { align-items: center; border-top: 1px solid var(--line); color: var(--ink); display: grid; gap: var(--space-3); padding: var(--space-3) var(--space-5); }
+.row-list > *:first-child { border-top: 0; }
+.row-list > a:hover { background: var(--card-2); text-decoration: none; }
+.row-list .row-title { font-weight: var(--weight-semibold); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-list .row-meta { color: var(--ink-3); font-size: var(--text-xs); }
+.row-list-head > * { color: var(--ink-3); font-size: var(--text-2xs); font-weight: var(--weight-bold); letter-spacing: var(--tracking-caps); text-transform: uppercase; }
+
+/* Grids. */
+.grid { display: grid; gap: var(--space-4); }
+@media (min-width: 760px) {
+  .grid.two   { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (min-width: 1100px) {
+  .grid.main-aside { grid-template-columns: minmax(0, 1fr) 22rem; align-items: start; }
+}
+
+/* ---- the post's section list (left rail) ---------------------------------
+   A jump-link table of contents: each row scrolls to its heading, and the
+   current section highlights as the reader scrolls past it.
+
+   It is a <details> because the rail stacks above the post on a phone,
+   where an open list of eleven rows would bury the first sentence. */
+.seclist-wrap { min-width: 0; }
+@media (min-width: 1000px) {
+  .seclist-wrap { position: sticky; top: var(--space-5); }
+}
+
+.seclist { overflow: hidden; padding: 0; }
+
+.seclist-head {
+  align-items: center;
+  background: var(--card-2);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  display: flex;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+  gap: var(--space-2);
+  list-style: none;
+  padding: var(--space-3) var(--space-5);
+}
+.seclist-head::-webkit-details-marker { display: none; }
+.seclist-head:hover { color: var(--accent); }
+.seclist-title { flex: 1; min-width: 0; }
+.seclist-chevron { color: var(--ink-3); flex: none; transform: rotate(-90deg); transition: transform 160ms ease; }
+.seclist[open] .seclist-chevron { transform: rotate(0deg); }
+
+.seclist-rows {
+  display: grid;
+  gap: 1px;
+  list-style: none;
+  margin: 0;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: var(--space-2);
+  scrollbar-width: thin;
+}
+@media (min-width: 1000px) {
+  .seclist-rows { max-height: calc(100vh - var(--chrome-bar) - 9rem); }
+}
+
+.secrow {
+  border-radius: var(--radius);
+  display: grid;
+  padding: 0.4rem var(--space-2);
+}
+.secrow:hover { background: var(--card-2); }
+.secrow[data-current='true'] { background: var(--accent-bg); }
+
+.secrow-link {
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  padding: 0.05rem 0;
+}
+.secrow-link:hover { color: var(--ink); text-decoration: none; }
+.secrow[data-current='true'] .secrow-link { color: var(--accent); font-weight: var(--weight-semibold); }
+
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

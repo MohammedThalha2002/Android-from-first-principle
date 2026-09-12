@@ -1,0 +1,77 @@
+<svg viewBox="0 0 700 340" role="img" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="dg-arrow-v" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-line)"/>
+    </marker>
+    <marker id="dg-arrow-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-accent)"/>
+    </marker>
+  </defs>
+
+  <g data-part="app-a">
+    <rect x="16" y="20" width="176" height="62" rx="8" fill="var(--dg-fill)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="104" y="44" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">your app asks for</text>
+    <text x="104" y="66" text-anchor="middle" font-family="var(--font-mono)" font-size="13" fill="var(--dg-label)">0x7f2a01</text>
+  </g>
+
+  <g data-part="app-b">
+    <rect x="16" y="240" width="176" height="62" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="104" y="264" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">another app asks for</text>
+    <text x="104" y="286" text-anchor="middle" font-family="var(--font-mono)" font-size="13" fill="var(--dg-label)">0x7f2a01</text>
+  </g>
+
+  <g data-part="mmu">
+    <rect x="232" y="132" width="106" height="76" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="285" y="164" text-anchor="middle" font-family="var(--font-mono)" font-size="13" fill="var(--dg-label)">MMU</text>
+    <text x="285" y="184" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">in the CPU</text>
+    <path d="M196 62 C 220 90 224 116 240 132" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-v)"/>
+    <path d="M196 262 C 220 236 224 224 240 208" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-v)"/>
+  </g>
+
+  <g data-part="table-a">
+    <rect x="360" y="24" width="150" height="88" rx="6" fill="var(--dg-fill)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="435" y="44" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">page table, app A</text>
+    <text x="435" y="66" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">0x7f2a01 to page 7</text>
+    <text x="435" y="86" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-muted)">0x7f2b00 to page 3</text>
+    <text x="435" y="104" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">written by the kernel</text>
+    <path d="M338 152 C 352 100 350 70 354 62" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-v)"/>
+  </g>
+
+  <g data-part="table-b">
+    <rect x="360" y="228" width="150" height="88" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="435" y="248" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">page table, app B</text>
+    <text x="435" y="270" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">0x7f2a01 to page 2</text>
+    <text x="435" y="290" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-muted)">0x7f4100 to page 9</text>
+    <text x="435" y="308" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">written by the kernel</text>
+    <path d="M338 188 C 352 240 350 270 354 278" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-v)"/>
+  </g>
+
+  <g data-part="ram">
+    <rect x="560" y="60" width="124" height="220" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="622" y="82" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">physical memory</text>
+    <rect x="576" y="96" width="92" height="26" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="622" y="114" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">page 2</text>
+    <rect x="576" y="130" width="92" height="26" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="622" y="148" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">page 3</text>
+    <rect x="576" y="164" width="92" height="26" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="622" y="182" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">page 7</text>
+    <rect x="576" y="198" width="92" height="26" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="622" y="216" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">page 9</text>
+  </g>
+
+  <g data-part="hit-a">
+    <rect x="576" y="164" width="92" height="26" rx="4" fill="var(--dg-accent)" stroke="var(--dg-accent)" stroke-width="1"/>
+    <text x="622" y="182" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-fill)">page 7</text>
+    <path d="M514 68 C 546 100 552 150 570 174" fill="none" stroke="var(--dg-accent)" stroke-width="2" marker-end="url(#dg-arrow-a)"/>
+  </g>
+
+  <g data-part="hit-b">
+    <path d="M514 272 C 546 220 552 140 570 112" fill="none" stroke="var(--dg-line)" stroke-width="2" marker-end="url(#dg-arrow-v)"/>
+    <text x="520" y="200" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">page 2</text>
+  </g>
+
+  <g data-part="gap">
+    <rect x="230" y="292" width="300" height="34" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <text x="380" y="314" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">no entry for the other app: no address exists</text>
+  </g>
+</svg>

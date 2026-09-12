@@ -1,0 +1,481 @@
+---
+title: "Background Execution"
+navTitle: "Background & push"
+summary: "Why the background keeps shrinking, WorkManager's exact guarantee, foreground services, alarms, Doze, and push as a signal."
+readingTime: "4 hours"
+minutes: 235
+tags: ["oom killer","oom_adj","process priority","cached process","doze","app standby buckets","workmanager","coroutineworker","constraints","unique work","expedited","foreground service","service types","alarmmanager","setexactandallowwhileidle","boot_completed","jobscheduler","battery historian","fcm","registration token"]
+draft: true
+date: "2026-05-30"
+subtopic: "android-internals"
+subtopicOrder: 9
+part: "II"
+verifiedAgainst: "WorkManager 2.10 · compileSdk 36"
+stage: "outline"
+labModule: ":ch09-background"
+sources: ["17-background-work-and-process-priority#A short history of restrictions, and the reason for each","17-background-work-and-process-priority#The decision table","17-background-work-and-process-priority#WorkManager","17-background-work-and-process-priority#Foreground services","17-background-work-and-process-priority#AlarmManager","17-background-work-and-process-priority#Other entry points","17-background-work-and-process-priority#Debugging background work","17-background-work-and-process-priority#Failure modes","17-background-work-and-process-priority#Cheat-sheet","18-notifications-push-and-real-time#The transport","18-notifications-push-and-real-time#FCM","18-notifications-push-and-real-time#The push → sync pattern","18-notifications-push-and-real-time#Notifications","18-notifications-push-and-real-time#Rules of respect","18-notifications-push-and-real-time#Real-time in the foreground","18-notifications-push-and-real-time#Debugging","18-notifications-push-and-real-time#Failure modes","18-notifications-push-and-real-time#Cheat-sheet"]
+---
+Every Android engineer eventually asks why running code in the background is so hard, usually while discovering that the thing that worked last year no longer does.
+
+The answer is not incompetence or churn. For over a decade the platform has been **systematically removing the ability to run in the background**, and every restriction was added because apps were collectively destroying battery life. Once you see the history as a sequence of responses to specific abuses, the current rules stop looking arbitrary and start looking like a policy you can predict.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## A short history of restrictions, and the reason for each
+
+Each of these was a response to a real pattern of abuse.
+
+| Version | Restriction | The abuse it stopped |
+|---|---|---|
+| 6.0 <ApiLevel changedIn="23" /> | **Doze** and App Standby | apps waking a stationary, unplugged phone all night |
+| 7.0 <ApiLevel changedIn="24" /> | Doze on the go; some implicit broadcasts removed | every app waking on every connectivity change |
+| 8.0 <ApiLevel changedIn="26" /> | **Background service limits**; most implicit broadcasts banned | services started forever from broadcasts |
+| 9 <ApiLevel changedIn="28" /> | **App Standby Buckets** | unused apps consuming the same resources as used ones |
+| 10 <ApiLevel changedIn="29" /> | Background activity starts blocked; background location gated | apps launching themselves into the foreground |
+| 11 <ApiLevel changedIn="30" /> | One-time permissions; auto-reset for unused apps | permanent grants to abandoned apps |
+| 12 <ApiLevel changedIn="31" /> | Exact alarms need a permission; foreground-service starts restricted | alarms as a background-execution loophole |
+| 13 <ApiLevel changedIn="33" /> | `POST_NOTIFICATIONS` runtime permission | notification spam |
+| 14 <ApiLevel changedIn="34" /> | **Declared foreground-service types**, each with prerequisites | "sync" services doing something else |
+| 15 <ApiLevel changedIn="35" /> | Foreground-service **timeouts** for some types | dataSync services running indefinitely |
+
+**Doze** is the important one to understand mechanically. When the device is stationary, unplugged and screen-off, the system enters maintenance cycles: network access is suspended and alarms deferred, with periodic windows in which deferred work runs in a batch. The windows get further apart the longer it stays idle. Your work is not cancelled — it is *deferred*, which is why "my sync ran six hours late" is expected behaviour rather than a bug.
+
+**App Standby Buckets** rank apps by how recently the user engaged: active, working set, frequent, rare, restricted. The bucket sets quotas for jobs and alarms. The **restricted** bucket, which a user can also impose manually, is severe — roughly one job a day.
+
+**OEM battery managers** are the part nobody can fully solve. Several manufacturers ship aggressive killers beyond AOSP, and an app that behaves perfectly on a Pixel may be killed on other devices. Be honest with users: if your app has a legitimate need to run, detect the situation and offer to open the battery-optimisation settings — but do not pretend a code change will fix a vendor policy.
+
+## The decision table
+
+The single most useful thing in this chapter. Work out which row you are in *before* writing code.
+
+| I need to | Use | Wrong-choice symptom |
+|---|---|---|
+| Work while the user is on the screen | a coroutine in `viewModelScope` (ch. 12) | a Service that outlives the screen and leaks |
+| Deferrable work that must eventually happen | **WorkManager** | a Service killed in the cached bucket; work silently lost |
+| Work the user is watching happen now | a **foreground service** with the right type | `ForegroundServiceStartNotAllowedException`, or a killed process |
+| Something at an exact wall-clock time | `AlarmManager` + `SCHEDULE_EXACT_ALARM` | fires minutes to hours late under Doze |
+| React to a server event | **FCM** (ch. 9) | polling that drains the battery |
+| A write that must outlive the screen but not the process | an application scope (ch. 14) | cancelled on navigation |
+
+Most "background" requirements are the second row. When in doubt, WorkManager.
+
+## WorkManager
+
+**The guarantee it makes, precisely:** your work will run *eventually*, even across process death and reboot, subject to constraints and system policy. It does **not** promise it will run soon, or at a specific time.
+
+That guarantee comes from a database. WorkManager persists every request to its own Room database and dispatches through `JobScheduler`, which is why work survives your process dying and the device restarting.
+
+```kotlin
+class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+    override suspend fun doWork(): Result = try {
+        repository.sync()
+        Result.success()
+    } catch (e: CancellationException) { throw e             // ch. 12
+    } catch (e: IOException) {
+        if (runAttemptCount < 5) Result.retry() else Result.failure()
+    }
+}
+```
+
+`CoroutineWorker` over `Worker`: `doWork` is a suspend function on `Dispatchers.Default`, and cancellation is cooperative.
+
+**Constraints** let the system batch your work with other apps', which is where the battery win comes from (ch. 16's radio):
+
+```kotlin
+Constraints.Builder()
+    .setRequiredNetworkType(NetworkType.UNMETERED)
+    .setRequiresBatteryNotLow(true)
+    .setRequiresCharging(true)
+    .build()
+```
+
+**Unique work is not optional.** Enqueue on every app launch without it and you accumulate duplicates:
+
+```kotlin
+WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(
+    "sync", ExistingPeriodicWorkPolicy.KEEP, request,
+)
+```
+
+`KEEP` leaves an existing schedule alone; `UPDATE` replaces it. For one-off work, `ExistingWorkPolicy.REPLACE`, `KEEP` or `APPEND`.
+
+**Input and output data cross Binder** (ch. 2) and are capped at roughly 10 KB. Pass an id; read the data in the worker.
+
+**Retry with backoff** — `Result.retry()` reschedules with the policy you set (linear or exponential, minimum ten seconds). `runAttemptCount` is how you stop retrying forever.
+
+**Expedited work** is for user-initiated work that should start promptly. It draws on a quota, so it is not a way to make everything urgent, and it needs a foreground-service fallback for older versions.
+
+**`setForeground`** promotes long-running work to a foreground service with a notification — the correct route for a large download the user started (ch. 17).
+
+Periodic work has a **minimum interval of 15 minutes**, and "periodic" means "once per interval, roughly", not "every 15 minutes on the dot".
+
+## Foreground services
+
+A foreground service is how you say: *the user knows this is happening and can see it*. In exchange you get foreground priority.
+
+The requirements have tightened, and Android 14 <ApiLevel changedIn="34" /> is the significant break — every foreground service must declare a **type**, and each type has prerequisites:
+
+```xml
+<service
+    android:name=".PlaybackService"
+    android:foregroundServiceType="mediaPlayback"
+    android:exported="false" />
+```
+
+| Type | Prerequisite |
+|---|---|
+| `mediaPlayback` | an active `MediaSession` (ch. 17) |
+| `location` | a location permission |
+| `dataSync` | **timeboxed** on Android 15+ — roughly six hours a day |
+| `camera`, `microphone` | the matching permission, plus while-in-use rules |
+| `shortService` | at most about three minutes, no type prerequisites |
+
+**`startForeground` timing is a hard rule.** After starting the service you must call `startForeground` within a few seconds or the system throws `ForegroundServiceDidNotStartInTimeException`. And you generally cannot *start* one from the background at all — `ForegroundServiceStartNotAllowedException` <ApiLevel changedIn="31" /> — unless you have an exemption such as responding to a high-priority FCM message (ch. 9).
+
+The notification is not decoration: it is the user's ability to see and stop the work, which is the entire justification for the elevated priority.
+
+**`dataSync` timeouts on Android 15+** mean a long sync must be restructured into WorkManager with checkpoints rather than one long-running service.
+
+## AlarmManager
+
+For wall-clock time, and only for that.
+
+| Method | Behaviour |
+|---|---|
+| `set` / `setWindow` | inexact; batched by the system; deferred by Doze |
+| `setExactAndAllowWhileIdle` | exact, fires in Doze — needs permission |
+| `setAlarmClock` | exact, shown as an alarm in the status bar; highest priority |
+
+Since Android 12 <ApiLevel changedIn="31" /> exact alarms require `SCHEDULE_EXACT_ALARM`, and Play restricts it to apps whose core function is alarms, timers or calendar events. Android 13 added `USE_EXACT_ALARM` for those genuine cases, granted without a user prompt but policy-enforced on the store.
+
+The practical guidance: **if the user did not ask for something to happen at a specific time, you do not need an exact alarm.** A reminder they set is a legitimate exact alarm; a background refresh is not.
+
+**Alarms do not survive reboot.** Reschedule on `BOOT_COMPLETED`:
+
+```xml
+<receiver android:name=".BootReceiver" android:exported="false">
+  <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
+</receiver>
+```
+
+WorkManager handles this for you, which is another reason to prefer it.
+
+## Other entry points
+
+**`JobScheduler`** directly — WorkManager uses it; using it yourself means reimplementing WorkManager's persistence and compatibility.
+
+**`SyncAdapter`** — legacy, tied to the account framework. Not for new work.
+
+**Broadcast receivers** — manifest-declared receivers no longer work for most **implicit** broadcasts <ApiLevel changedIn="26" />, which was the loophole apps used to wake on any system event. Explicit broadcasts to your own app still work, as do a small allowlist including `BOOT_COMPLETED`. Runtime-registered receivers work while your app runs. `ACTION_MY_PACKAGE_REPLACED` tells you your own app was updated — useful for rescheduling.
+
+**App widgets** update through their own pipeline with a minimum period of 30 minutes; anything more frequent must be pushed from your app (appendix B).
+
+## Debugging background work
+
+Background work is nearly impossible to debug by waiting. Force the states instead.
+
+```bash
+# is my work scheduled, and what is it waiting for?
+adb shell dumpsys jobscheduler | grep -A 25 "<package>"
+
+# force Doze, without waiting an hour
+adb shell dumpsys deviceidle force-idle
+adb shell dumpsys deviceidle step        # advance through the states
+adb shell dumpsys deviceidle unforce
+
+# standby buckets
+adb shell am get-standby-bucket <pkg>
+adb shell am set-standby-bucket <pkg> restricted   # the worst case, on demand
+
+# battery
+adb shell dumpsys batterystats --charged <pkg>
+```
+
+The **Background Task Inspector** in Android Studio shows WorkManager state — enqueued, running, blocked, and by which constraint — which is usually the fastest answer to "why has it not run".
+
+## Failure modes: Background work
+
+**Sync works in development and never runs in the field.** *Symptom:* fine on your desk, hours late or absent for users. *Cause:* Doze and standby buckets, which a plugged-in device with the screen on never enters. *Fix:* test with `deviceidle force-idle` and a `restricted` bucket.
+
+**Fifty copies of the same job.** *Symptom:* battery complaints; `dumpsys jobscheduler` lists many identical jobs. *Cause:* enqueued on every launch without unique work. *Fix:* `enqueueUniquePeriodicWork` with `KEEP`.
+
+**`ForegroundServiceStartNotAllowedException`.** *Symptom:* a crash when starting a service from the background. *Cause:* Android 12+ restrictions. *Fix:* WorkManager with `setForeground`, or start it from a valid context such as a high-priority FCM message.
+
+**A crash after a targetSdk bump to 34.** *Symptom:* `MissingForegroundServiceTypeException`. *Cause:* no declared service type. *Fix:* declare the type and satisfy its prerequisite.
+
+**A reminder fires an hour late.** *Symptom:* user-set alarms are unreliable. *Cause:* an inexact alarm deferred by Doze. *Fix:* `setExactAndAllowWhileIdle` with the permission — but only if the user asked for that time.
+
+**Work stops after a reboot.** *Symptom:* everything works until the phone restarts. *Cause:* alarms do not survive reboot. *Fix:* `BOOT_COMPLETED`, or WorkManager.
+
+**Works on a Pixel, killed on another vendor's phone.** *Symptom:* device-specific reports of background work never running. *Cause:* an OEM battery manager. *Fix:* offer the battery-optimisation settings; be honest that it is a device policy.
+
+## Cheat-sheet: Background work
+
+```kotlin
+// the default answer for background work
+WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(
+    "sync", ExistingPeriodicWorkPolicy.KEEP,
+    PeriodicWorkRequestBuilder<SyncWorker>(6, TimeUnit.HOURS)
+        .setConstraints(Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.UNMETERED)
+            .setRequiresBatteryNotLow(true).build())
+        .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+        .build(),
+)
+```
+
+```bash
+adb shell dumpsys jobscheduler | grep -A 25 <pkg>
+adb shell dumpsys deviceidle force-idle          # then 'unforce'
+adb shell am set-standby-bucket <pkg> restricted
+adb shell dumpsys batterystats --charged <pkg>
+```
+
+| Requirement | Tool |
+|---|---|
+| eventually, durably | WorkManager |
+| now, user-visible | foreground service with a type |
+| at a time the user chose | exact alarm, with permission |
+| server-initiated | FCM (ch. 9) |
+| while the screen is open | a coroutine (ch. 12) |
+
+<LabCard module=":ch17-background">
+Build a sync job that survives a reboot, respects Doze, refuses to run on a metered connection, retries with exponential backoff, and is **provably deduplicated when scheduled fifty times**. Prove each with adb rather than by waiting: `deviceidle force-idle` for Doze, `set-standby-bucket restricted` for the worst case, and `dumpsys jobscheduler` to show exactly one job after fifty enqueues.
+</LabCard>
+
+## The transport
+
+If each app kept its own connection to its own server, a phone with fifty apps would hold fifty TCP connections alive, each sending heartbeats, each keeping the radio awake (ch. 16). Battery life would be measured in hours.
+
+So the platform keeps **one** connection. Play services maintains it, sends the heartbeats, handles reconnection after a network change, and dispatches an arriving message to the right app — waking that app's process if needed (ch. 2).
+
+<Diagram
+  caption="One socket for the whole device. Every constraint on push — best-effort delivery, no background socket of your own, nothing at all after a force-stop — follows from this shape."
+  label="Topology diagram: instead of every app holding its own connection, Play services holds a single persistent socket to the push service and dispatches arriving messages to the right app, waking its process if needed."
+>
+  <svg viewBox="0 0 660 242" width="660" height="242">
+    <text x="12" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">IF EVERY APP KEPT ITS OWN</text>
+    <rect x="12" y="26" width="112" height="20" rx="4" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="68" y="40" text-anchor="middle" font-family="var(--font-mono)" font-size="9.5" fill="var(--dg-warn)">app 1</text>
+    <rect x="12" y="50" width="112" height="20" rx="4" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="68" y="64" text-anchor="middle" font-family="var(--font-mono)" font-size="9.5" fill="var(--dg-warn)">app 2</text>
+    <rect x="12" y="74" width="112" height="20" rx="4" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="68" y="88" text-anchor="middle" font-family="var(--font-mono)" font-size="9.5" fill="var(--dg-warn)">... app 50</text>
+    <text x="68" y="112" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">50 sockets, 50 heartbeats,</text>
+    <text x="68" y="126" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">the radio never sleeps</text>
+
+    <text x="196" y="18" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">WHAT ACTUALLY HAPPENS</text>
+    <rect x="192" y="26" width="118" height="20" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="251" y="40" text-anchor="middle" font-family="var(--font-mono)" font-size="9.5" fill="var(--dg-label)">your app</text>
+    <rect x="192" y="50" width="118" height="20" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="251" y="64" text-anchor="middle" font-family="var(--font-mono)" font-size="9.5" fill="var(--dg-label)">another app</text>
+    <rect x="192" y="74" width="118" height="20" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="251" y="88" text-anchor="middle" font-family="var(--font-mono)" font-size="9.5" fill="var(--dg-label)">a third app</text>
+
+    <rect x="352" y="26" width="140" height="68" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="422" y="50" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">Play services</text>
+    <text x="422" y="68" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">ONE socket, its</text>
+    <text x="422" y="82" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">heartbeats, its reconnects</text>
+
+    <rect x="530" y="38" width="118" height="44" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="589" y="65" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">FCM</text>
+
+    <path d="M310 40 L352 52M310 62 L352 58M310 84 L352 66" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M492 60 L530 60" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M522 54 L530 60 L522 66" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <path d="M422 94 L422 122 L251 122 L251 98" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M245 106 L251 98 L257 106" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="336" y="138" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-ok)">wakes your process</text>
+
+    <text x="330" y="170" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">Everything odd about push follows from this: you cannot keep your own socket alive</text>
+    <text x="330" y="188" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">in the background, delivery is best-effort rather than guaranteed, and after the user</text>
+    <text x="330" y="206" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">force-stops your app nothing arrives at all until they open it again.</text>
+    <text x="330" y="230" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">Regions without Play services have no FCM — plan for it, or do not ship there.</text>
+  </svg>
+</Diagram>
+
+Three consequences follow directly:
+
+**You cannot keep your own socket alive in the background.** Not because an API forbids it, but because the process restrictions of chapter 9 will kill it and Doze will suspend its network. A persistent connection is only viable while your app is in the foreground.
+
+**Delivery is best-effort, not guaranteed.** The connection can be down; the device can be in Doze; the message can expire. Design for messages that never arrive.
+
+**Regions without Google Play services** — much of the Chinese market, some enterprise builds — have no FCM. The alternatives are vendor push services (Huawei, Xiaomi, Oppo) behind an abstraction, or a foreground service with your own socket, which is a very different battery and reliability profile.
+
+## FCM
+
+**Registration tokens** identify one app install on one device. Two properties matter:
+
+They **rotate**. A token can change on reinstall, on app data being cleared, or at Firebase's discretion. `onNewToken` fires, and your server must accept the new one and retire the old.
+
+They are **per install, not per user**. One user with a phone and a tablet has two tokens; one device shared by two accounts needs the token unregistered on logout — otherwise the next user receives the previous user's notifications, which is a privacy incident rather than a bug.
+
+**The message-type distinction is the one that produces the most confusion:**
+
+| | Notification message | Data message |
+|---|---|---|
+| Contains | a `notification` block | only `data` |
+| App in foreground | `onMessageReceived` | `onMessageReceived` |
+| App backgrounded | **the system posts it; your code never runs** | `onMessageReceived` runs |
+| You control the UI | no | yes |
+
+That third row explains almost every "the notification looks wrong when the app is closed" report. If you need to inspect, localise, or decide anything, send a **data-only message** and build the notification yourself.
+
+**Priority** interacts with Doze (ch. 9). `normal` messages are batched and deferred while the device is idle. `high` priority wakes the device and delivers immediately — and is rate-limited, so using it for everything degrades your app's standing. Reserve it for what genuinely cannot wait: a message, a call.
+
+**Collapse keys** replace an undelivered message with a newer one sharing the key, so a device offline for a day receives the latest state rather than a hundred queued updates. **TTL** says how long to keep trying; `ttl=0` means deliver now or discard, which is right for a call invitation.
+
+**Payload limit is 4 KB**, which is a hint about the intended design.
+
+## The push → sync pattern
+
+The most important architectural point in this chapter.
+
+**Treat a push as a signal, not as data.** The message says "something changed"; your app wakes, enqueues work, and fetches authoritative state (ch. 17).
+
+```kotlin
+override fun onMessageReceived(message: RemoteMessage) {
+    // Not: parse the payload and write it to the database.
+    WorkManager.getInstance(this).enqueueUniqueWork(
+        "sync", ExistingWorkPolicy.KEEP,
+        OneTimeWorkRequestBuilder<SyncWorker>()
+            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+            .build(),
+    )
+}
+```
+
+**Why sending business data in the payload eventually corrupts state:** pushes are lossy, unordered, size-limited and deduplicated by collapse key. Write payloads directly into your database and you get a store built from a subset of events, applied in the wrong order, with some collapsed away. The corruption is silent and appears weeks later as data that does not match the server.
+
+`onMessageReceived` also has a short execution budget — roughly ten to twenty seconds — before the system may kill you. Enqueue and return; do not sync inline.
+
+## Notifications
+
+**Channels** <ApiLevel changedIn="26" /> are mandatory and are a user-facing control: the user can silence one category and keep another. Create them at startup, and design them by *user intent* — "Messages", "Order updates" — not by internal architecture. Channel importance is set at creation and cannot be raised later; only the user can change it.
+
+**`POST_NOTIFICATIONS`** <ApiLevel changedIn="33" /> is a runtime permission. Ask **at a moment where the value is obvious** — after the user enables order updates, not on first launch. Asking cold is the reliable way to be denied permanently (ch. 10).
+
+```kotlin
+val notification = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
+    .setSmallIcon(R.drawable.ic_notification)
+    .setContentTitle(sender)
+    .setContentText(preview)
+    .setStyle(NotificationCompat.MessagingStyle(me).addMessage(preview, timestamp, person))
+    .setContentIntent(deepLinkPendingIntent)   // ch. 6, ch. 7
+    .setAutoCancel(true)
+    .build()
+```
+
+**Styles** are worth using: `MessagingStyle` renders a conversation properly and feeds the system's conversation features; `BigTextStyle` expands; `BigPictureStyle` shows an image; `ProgressStyle` for a download (ch. 17).
+
+**The `PendingIntent` and a correct back stack** is the detail that separates a considered notification from a sloppy one. Tapping should land on the right screen *with a sensible up* (ch. 7) — a synthesised back stack — and the `PendingIntent` needs a **distinct request code per item** or every notification opens the same one (ch. 6).
+
+**Grouping** — several notifications from one app should form a group with a summary, or you have taken over the shade.
+
+**Full-screen intents** take over the display and are restricted to genuine calls and alarms; misuse is a Play policy violation.
+
+## Rules of respect
+
+Notifications are the most abusable surface on the device, and the platform is progressively removing the ability to abuse them.
+
+- **Every notification should be actionable or genuinely informative.** "Come back and see what you missed" is the pattern that gets your channel silenced.
+- **Frequency caps per user.** More than a handful a day, unprompted, and the user disables the channel — permanently, and you will never know.
+- **Dismissal is a signal.** If a category is always swiped away, stop sending it.
+- **Do not fight Do Not Disturb.** Requesting an exemption you do not need is a policy risk.
+- **Play policy lines:** no notifications that are purely promotional in a transactional channel, no full-screen intents outside calls and alarms, no misleading content.
+
+The strategic point: a user who disables your notifications is unreachable forever. Every marginal notification spends a limited budget.
+
+## Real-time in the foreground
+
+When the user is looking at the screen, a persistent connection becomes reasonable — and is the right choice for a chat or a live feed, where push latency and batching are not acceptable.
+
+**WebSocket** with OkHttp (ch. 16) gives full duplex. **Server-sent events** are one-way over plain HTTP, cheaper and more proxy-friendly when you only need server-to-client.
+
+The things that make a real-time client work:
+
+**Lifecycle scoping.** Connect when the screen starts, disconnect when it stops (ch. 5) — a connection outliving the UI is a battery and priority problem.
+
+**Reconnect with backoff and jitter** (ch. 12, ch. 16). A server restart otherwise brings every client back at the same instant.
+
+**Heartbeats** detect a connection that is open but dead — a NAT timeout does not close the socket.
+
+**Resume from a sequence number.** After reconnecting, ask for what was missed. Without it, a dropped connection silently loses messages, which is worse than not being connected at all.
+
+**Push is still the default when the app is not in the foreground.** The two work together: a socket while the user is watching, push when they are not.
+
+## Debugging
+
+The two questions to separate: did the message arrive, and did your handling of it work?
+
+```bash
+# is FCM delivering to this device at all
+adb logcat -s FirebaseMessaging
+
+# what the system thinks about your notifications
+adb shell dumpsys notification --noredact | grep -A 20 <pkg>
+adb shell cmd notification post -S bigtext -t 'Title' tag 'Body'   # post one by hand
+
+# send a real push, without touching your backend
+curl -X POST https://fcm.googleapis.com/v1/projects/<id>/messages:send \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"message":{"token":"<device-token>","data":{"type":"sync"}}}'
+```
+
+**"The notification only arrives when I open the app"** has a small set of causes: the device is in Doze and the message is `normal` priority (ch. 9); the app was **force-stopped**, which blocks FCM until the user launches it again; an OEM battery manager killed the app; or the token rotated and your server is sending to the old one.
+
+Force-stop is worth knowing precisely: an app that the *user* force-stops receives nothing until they open it again. This is deliberate, it is not a bug, and it means testing with `am force-stop` shows you a real state your users can be in.
+
+## Failure modes: Notifications & push
+
+**A notification is missing content or shows a raw key when the app is closed.** *Symptom:* correct in the foreground, wrong when backgrounded. *Cause:* a notification-type message, so the system posted it and your code never ran. *Fix:* data-only messages.
+
+**A user receives the previous user's notifications.** *Symptom:* a privacy report on a shared device. *Cause:* the token was not unregistered on logout. *Fix:* delete the token on sign-out; re-register on sign-in.
+
+**Every notification opens the same screen.** *Symptom:* five notifications, one destination. *Cause:* one `PendingIntent` request code; extras are not compared (ch. 6). *Fix:* a distinct request code per item.
+
+**Local state disagrees with the server after a period offline.** *Symptom:* data that does not match, no error anywhere. *Cause:* writing push payloads straight into the store — lossy, unordered, collapsed. *Fix:* push as a signal; sync for the data.
+
+**Notifications are delayed by hours.** *Symptom:* arriving in batches when the phone is picked up. *Cause:* `normal` priority under Doze. *Fix:* `high` priority for genuinely urgent messages only.
+
+**Nothing arrives after the user swiped the app away, or force-stopped it.** *Symptom:* silence until the app is opened. *Cause:* force-stop blocks FCM by design; some OEMs force-stop on swipe. *Fix:* nothing in code — but know it, and do not chase it as a bug.
+
+**Permission denied permanently.** *Symptom:* very low `POST_NOTIFICATIONS` grant rate. *Cause:* asked on first launch, out of context. *Fix:* ask when the user does something notifications serve (ch. 10).
+
+## Cheat-sheet: Notifications & push
+
+```kotlin
+// push is a signal: wake, enqueue, fetch
+override fun onMessageReceived(message: RemoteMessage) {
+    WorkManager.getInstance(this)
+        .enqueueUniqueWork("sync", ExistingWorkPolicy.KEEP, syncRequest())
+}
+
+// tokens rotate, and are per install
+override fun onNewToken(token: String) { api.registerToken(token) }
+// on logout: FirebaseMessaging.getInstance().deleteToken()
+
+// a distinct request code, or they all open the same screen (ch. 6)
+PendingIntent.getActivity(ctx, item.id.hashCode(), intent, FLAG_IMMUTABLE or FLAG_UPDATE_CURRENT)
+```
+
+```bash
+adb logcat -s FirebaseMessaging
+adb shell dumpsys notification --noredact | grep -A 20 <pkg>
+adb shell am force-stop <pkg>     # then push: nothing arrives, by design
+```
+
+| Need | Choose |
+|---|---|
+| reach an app that is not running | FCM, data-only |
+| urgent, must wake the device | `high` priority, sparingly |
+| the latest state only | a collapse key |
+| live updates while on screen | WebSocket or SSE, lifecycle-scoped |
+| the actual data | a sync, triggered by the push |
+
+<LabCard module=":ch18-notifications">
+Deliver one message end to end: push arrives → work enqueued → local store updated → a notification that deep-links into the correct screen with a sensible up. Then verify it under the two conditions that break naive implementations — after `adb shell am force-stop`, and after a token rotation (clear app data to force one). Both should be understood outcomes rather than surprises.
+</LabCard>

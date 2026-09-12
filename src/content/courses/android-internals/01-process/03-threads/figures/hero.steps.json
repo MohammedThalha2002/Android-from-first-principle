@@ -1,0 +1,12 @@
+{
+  "title": "One process, four threads",
+  "desc": "A drawing of one app process holding four threads, the heap they all share, the private stack each one keeps, and the single thread that reaches the screen.",
+  "steps": [
+    { "show": ["process"], "note": "One process, one address space, one page table. Everything below is inside it." },
+    { "show": ["process", "main"], "note": "One path of execution runs through it. Android calls your code on this one." },
+    { "show": ["main", "render", "binder", "gc"], "note": "Three more you never created: drawing, calls from other processes, garbage collection." },
+    { "show": ["main", "render", "binder", "gc", "heap"], "note": "All four see the same objects, at the same addresses, with no copying." },
+    { "show": ["main", "render", "binder", "gc", "stacks"], "note": "Each keeps its own stack: its local variables and the chain of calls that got it here." },
+    { "show": ["main", "screen"], "note": "Only the main thread may touch the screen, and it produces every frame." }
+  ]
+}

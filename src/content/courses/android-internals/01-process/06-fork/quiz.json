@@ -1,0 +1,78 @@
+{
+  "lesson": "1.4",
+  "title": "Where your process came from",
+  "questions": [
+    {
+      "stage": "pre",
+      "question": "A Java program on a laptop takes a second or more to start. An Android app puts a screen up in a few hundred milliseconds on slower hardware. What is the main reason?",
+      "options": [
+        "Android compiles apps ahead of time, so there is no startup work left",
+        "Phones have faster storage than laptops",
+        "The process is copied from one that had already loaded the runtime and the framework",
+        "Android keeps every installed app's process running in the background"
+      ],
+      "correct": 2,
+      "explanation": "The expensive work happened once at boot, in another process, and launching an app copies that process. Ahead-of-time compilation is real and helps too, but it is a different mechanism with its own lesson."
+    },
+    {
+      "stage": "check",
+      "question": "A process is forked. What did the kernel actually copy?",
+      "options": [
+        "The whole of the parent's memory, byte for byte",
+        "The page table, whose entries point at the same physical pages",
+        "Only the parent's code, not its data",
+        "Nothing. The two processes share one page table"
+      ],
+      "correct": 1,
+      "explanation": "Copying a table is cheap even when it describes a hundred megabytes. Each process gets its own table, which matters because the two will diverge as soon as either writes."
+    },
+    {
+      "stage": "check",
+      "question": "Which of these is already in memory before the first line of your own code runs in a new app process?",
+      "options": [
+        "Your Application class",
+        "Your dependency graph",
+        "The framework classes the parent process preloaded",
+        "Your Room database"
+      ],
+      "correct": 2,
+      "explanation": "The parent loaded the runtime and the framework before any app existed, and your process inherited all of it. Everything you wrote has to be loaded into your process, from disk, every time a new one is created."
+    },
+    {
+      "stage": "check",
+      "question": "Your Application.onCreate log line appears twice on a single launch. What is the most likely cause?",
+      "options": [
+        "The Activity was destroyed and recreated",
+        "A component declared with android:process is running in a second process",
+        "The log buffer was flushed twice",
+        "onCreate is called once for every Activity in the app"
+      ],
+      "correct": 1,
+      "explanation": "Application.onCreate runs once per process, so two calls means two processes. Each one is its own fork with its own statics, which is also why a singleton in one of them is invisible to the other."
+    },
+    {
+      "stage": "post",
+      "question": "One app writes to a page it inherited from the parent. What happens, step by step?",
+      "options": [
+        "The change appears in every process pointing at that page",
+        "The write fails, because inherited pages are read-only",
+        "The write traps into the kernel, which copies that page and repoints only the writer's entry",
+        "The kernel copies the whole process before allowing the write"
+      ],
+      "correct": 2,
+      "explanation": "The read-only mark is what makes the trap happen, and the kernel's response is deliberately minimal: one page, one entry. Every other process keeps pointing at the original and never learns anything happened."
+    },
+    {
+      "stage": "post",
+      "question": "Adding up the memory reported for every running app comes to more than the phone physically has. Why?",
+      "options": [
+        "Pages shared between processes are counted in each of them",
+        "The numbers include the disk cache as well as memory",
+        "The tool reports virtual address space, which is not real memory",
+        "Android over-reports memory to encourage optimisation"
+      ],
+      "correct": 0,
+      "explanation": "The framework is loaded once and charged to every process pointing at it, so the totals overlap by design. To judge what an app really costs you have to separate what is private to it from what it shares."
+    }
+  ]
+}

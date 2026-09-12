@@ -1,0 +1,31 @@
+{
+  "name": "android-from-first-principles",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "stop": "astro dev stop",
+    "clean": "rm -rf .astro node_modules/.vite dist",
+    "test": "node --test tests/*.test.js",
+    "test:unit": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint:content": "node --test tests/content.test.js"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^8.0.0",
+    "@astrojs/sitemap": "^3.7.4",
+    "@fontsource-variable/manrope": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.2.8",
+    "astro": "^7.2.10",
+    "sharp": "^0.35.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^3.2.4",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,763 @@
+---
+title: "Production"
+navTitle: "Production"
+summary: "Two million devices you cannot attach a debugger to: crash reporting, flags, Gradle and CI, signing and rollout, targetSdk, debugging without a repro."
+readingTime: "4 hours"
+minutes: 350
+tags: ["gradle","configuration phase","task graph","up-to-date","agp","build variants","convention plugin","version catalog","configuration cache","build cache","ksp","non-transitive r","build scan","api vs implementation","product flavours","play app signing","ci pipeline","detekt","gradle play publisher","staged rollout"]
+draft: true
+date: "2026-08-15"
+subtopic: "android-internals"
+subtopicOrder: 20
+part: "IV"
+verifiedAgainst: "Gradle 9.2 · AGP 8.13 · Kotlin 2.3"
+stage: "outline"
+labModule: ":ch20-production"
+sources: ["23-gradle-modularisation-and-ci-cd#Gradle's model","23-gradle-modularisation-and-ci-cd#AGP","23-gradle-modularisation-and-ci-cd#Writing build logic that survives","23-gradle-modularisation-and-ci-cd#Build speed as an engineering task","23-gradle-modularisation-and-ci-cd#Modularisation strategy","23-gradle-modularisation-and-ci-cd#Variants in practice","23-gradle-modularisation-and-ci-cd#Signing &amp; distribution plumbing","23-gradle-modularisation-and-ci-cd#CI pipelines","23-gradle-modularisation-and-ci-cd#Static analysis","23-gradle-modularisation-and-ci-cd#CD","23-gradle-modularisation-and-ci-cd#Failure modes","23-gradle-modularisation-and-ci-cd#Cheat-sheet","24-release-engineering-and-observability#Crash &amp; ANR reporting","24-release-engineering-and-observability#Logging discipline","24-release-engineering-and-observability#Metrics &amp; analytics","24-release-engineering-and-observability#Tracing in the field","24-release-engineering-and-observability#Feature flags &amp; remote config","24-release-engineering-and-observability#Release process","24-release-engineering-and-observability#Experimentation","24-release-engineering-and-observability#Play Console as an engineering tool","24-release-engineering-and-observability#Debugging without a repro","24-release-engineering-and-observability#Failure modes","24-release-engineering-and-observability#Cheat-sheet","25-compatibility-and-platform-evolution#The three SDK numbers","25-compatibility-and-platform-evolution#Behaviour changes gated on targetSdk vs applying to all apps","25-compatibility-and-platform-evolution#Play's target-API requirement","25-compatibility-and-platform-evolution#Writing version-aware code","25-compatibility-and-platform-evolution#Desugaring","25-compatibility-and-platform-evolution#AndroidX &amp; dependency hygiene","25-compatibility-and-platform-evolution#Fragmentation in reality","25-compatibility-and-platform-evolution#Migrations as a repeatable exercise","25-compatibility-and-platform-evolution#Failure modes","25-compatibility-and-platform-evolution#Cheat-sheet"]
+---
+Everything before this chapter assumed you could look at the thing that went wrong. Now your app is on two million devices across a thousand hardware configurations, running versions you shipped a year ago, and you cannot attach a debugger to any of them.
+
+What you can do is **decide in advance what the app will tell you**, and build the ability to change its behaviour without shipping a release. Those two capabilities — observability and control — are what separate teams who ship confidently from teams who ship and hope.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Gradle's model
+
+Three phases, every build, in order.
+
+**Initialisation** — Gradle reads `settings.gradle.kts` and decides which projects exist.
+
+**Configuration** — every build script in every module is *executed* to build the **task graph**. This phase runs even for a task in one module, which is why a hundred-module project is slow to start before compiling anything.
+
+**Execution** — the tasks you asked for, and their dependencies, run.
+
+<Diagram
+  caption="Three phases. Configuration runs every build script in every module even for a one-module change, which is why a large project is slow before it compiles anything — and why the configuration cache is usually the biggest win."
+  label="Gradle build phases: initialisation reads settings and decides which projects exist, configuration executes every build script to construct the task graph, and execution runs only the requested tasks and their dependencies, skipping any whose inputs are unchanged."
+>
+  <svg viewBox="0 0 660 250" width="660" height="250">
+    <rect x="12" y="34" width="150" height="66" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="87" y="56" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">INITIALISATION</text>
+    <text x="87" y="74" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">reads settings,</text>
+    <text x="87" y="88" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">finds the projects</text>
+
+    <rect x="200" y="34" width="200" height="66" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="300" y="56" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">CONFIGURATION</text>
+    <text x="300" y="74" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">EVERY build script runs,</text>
+    <text x="300" y="88" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">in every module, every build</text>
+
+    <rect x="438" y="34" width="210" height="66" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="543" y="56" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">EXECUTION</text>
+    <text x="543" y="74" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">only the tasks you asked for,</text>
+    <text x="543" y="88" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">and their dependencies</text>
+
+    <path d="M162 67h38M400 67h38" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M192 61 L200 67 L192 73M430 61 L438 67 L430 73" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+
+    <rect x="200" y="128" width="200" height="42" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="300" y="146" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">configuration cache</text>
+    <text x="300" y="161" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">skips this phase entirely</text>
+    <path d="M300 100 L300 128" fill="none" stroke="var(--dg-ok)" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+    <rect x="438" y="128" width="210" height="42" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="543" y="146" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">inputs unchanged: UP-TO-DATE</text>
+    <text x="543" y="161" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">the task is skipped</text>
+    <path d="M543 100 L543 128" fill="none" stroke="var(--dg-ok)" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+    <text x="330" y="204" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">A clean build deletes every output, which throws away the right-hand box —</text>
+    <text x="330" y="222" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">so when a clean build "fixes" something, the bug is a task with bad input declarations.</text>
+  </svg>
+</Diagram>
+
+**Inputs, outputs and up-to-date checks** are the core idea. Each task declares its inputs (files, properties) and outputs. Gradle hashes the inputs; if they match the previous run and outputs exist, the task is `UP-TO-DATE` and skipped. That is where build speed comes from.
+
+**So "clean build" is almost always wrong advice.** It deletes every output, guaranteeing a full rebuild — discarding the mechanism that makes builds fast to work around a problem that is nearly always a task with badly declared inputs. When a clean build "fixes" something, the bug is the declaration, not the cache.
+
+## AGP
+
+The Android Gradle Plugin adds Android's build model on top.
+
+**Variants are the product of build types and flavours.** Two build types (debug, release) times two flavours (dev, prod) is four variants, each with its own task chain. Add a dimension and the count multiplies — the main reason a build has hundreds of tasks.
+
+**`buildFeatures`** turns capabilities on: `buildConfig`, `compose`, `viewBinding`. Each costs build time, so leave off what you do not use.
+
+**Source sets** follow variants: `src/main`, `src/debug`, `src/prodRelease`. This is how a debug-only network config (ch. 16) or a stubbed implementation gets in without an `if`.
+
+**Manifest and resource merging** (ch. 6, ch. 19) happen here, and produce the merged manifest you should be reading rather than your source file.
+
+**Where artifacts land** — `build/outputs/apk/`, `build/outputs/bundle/`, `build/outputs/mapping/` for R8 mapping files, `build/reports/` for lint and tests. Knowing this saves a lot of hunting.
+
+## Writing build logic that survives
+
+**Kotlin DSL** for type safety and IDE completion.
+
+**Version catalogs** put every dependency and version in one TOML, so a bump is one line and versions cannot drift between modules:
+
+```toml
+[versions]
+kotlin = "2.3.0"
+[libraries]
+room-runtime = { module = "androidx.room:room-runtime", version.ref = "room" }
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+```
+
+**Convention plugins in `build-logic`** are the answer to twenty modules with the same forty lines of configuration:
+
+```kotlin
+// build-logic/src/main/kotlin/android-library-convention.gradle.kts
+plugins { id("com.android.library"); id("org.jetbrains.kotlin.android") }
+android {
+    compileSdk = 36
+    defaultConfig { minSdk = 24 }
+}
+```
+
+Then each module is `plugins { id("android-library-convention") }`. One place to change compileSdk.
+
+**Avoid `allprojects {}` and `subprojects {}`.** Cross-project configuration forces Gradle to configure everything and is incompatible with the configuration cache. Convention plugins do the same job correctly.
+
+**Custom tasks need declared inputs and outputs**, or they run every time and break the up-to-date check for everything downstream:
+
+```kotlin
+abstract class GenerateTask : DefaultTask() {
+    @get:InputFile abstract val source: RegularFileProperty
+    @get:OutputDirectory abstract val outputDir: DirectoryProperty
+}
+```
+
+**Lazy `Provider` APIs** — `tasks.register` rather than `tasks.create`, `Property<T>` rather than a plain field — avoid doing work at configuration time for tasks that may not run.
+
+**Configuration cache rules:** no reading `project` at execution time, no `System.getenv` in a task action, no `Task.project`. Obeying them is what lets Gradle skip the configuration phase entirely.
+
+## Build speed as an engineering task
+
+Measure first. **A build scan** tells you where the time went; optimising without one is guesswork.
+
+```bash
+./gradlew assembleDebug --scan
+./gradlew assembleDebug --profile      # local HTML report
+```
+
+Then, in rough order of payoff:
+
+**Configuration cache** skips the configuration phase when nothing structural changed — often the largest single win in a big project.
+
+```properties
+org.gradle.configuration-cache=true
+org.gradle.caching=true
+org.gradle.parallel=true
+```
+
+**Build cache**, local and remote. A remote cache means CI's outputs are reused on developer machines: a task someone else already ran is downloaded rather than executed.
+
+**KSP over kapt** (ch. 12). Kapt generates Java stubs for all your Kotlin so Java annotation processors can read them, and that stub task is often the single slowest in the build. KSP is typically about twice as fast.
+
+**Module graph shape.** Wide and shallow beats deep and narrow: modules with no dependency between them build in parallel, while a chain of ten serialises.
+
+**`api` leakage is a rebuild amplifier** (ch. 14). `api` puts a dependency on your consumers' compile classpath, so changing it recompiles them all. `implementation` does not. Defaulting to `implementation` is one of the highest-leverage build-time choices available.
+
+**Non-transitive R classes** (default in recent AGP) mean each module's `R` contains only its own resources, so adding a resource in one module does not invalidate every other module's R.
+
+**JVM tuning** — enough heap for the Gradle daemon and the Kotlin compiler, but not so much that GC pauses grow:
+
+```properties
+org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g
+```
+
+## Modularisation strategy
+
+Chapter 14 covered the architecture; this is the build-time view.
+
+The reasons to modularise are **build time** (parallelism and avoided recompilation) and **ownership** (clear boundaries between teams). Not aesthetics. Twenty modules in a small app buys configuration overhead and nothing else.
+
+```
+:app                    wiring only
+:feature:feed           a screen or flow
+:feature:detail
+:core:data              repositories
+:core:database          Room
+:core:network           OkHttp, Retrofit
+:core:designsystem      tokens and components (ch. 19)
+:build-logic            convention plugins
+```
+
+**Demo apps per feature** — a tiny app module that launches one feature — give a fast build-and-run loop while working on it, instead of building the whole app.
+
+**Enforce the graph rules** rather than documenting them. A custom Gradle check or a lint rule that fails when `:feature:a` depends on `:feature:b` prevents the cycle that otherwise appears the week someone is in a hurry.
+
+## Variants in practice
+
+**Flavours for environments** — dev, staging, prod — with per-variant endpoints:
+
+```kotlin
+productFlavors {
+    create("dev")   { buildConfigField("String", "BASE_URL", "\"https://dev.example.com\"") }
+    create("prod")  { buildConfigField("String", "BASE_URL", "\"https://api.example.com\"") }
+}
+```
+
+**`minifyEnabled` on a debug variant** is the highest-value trick in this section. R8-only bugs (ch. 2, ch. 16, ch. 11) otherwise appear first in release, when you are shipping. A `debugMinified` variant gives you R8 parity in the normal development loop.
+
+**Build-time feature flags** via `buildConfigField` are for things that never change at runtime. Anything you want to toggle without a release belongs in remote config (ch. 20).
+
+## Signing &amp; distribution plumbing
+
+**Keystores never go in the repository.** A leaked signing key cannot be revoked in any way that helps existing users.
+
+**Play App Signing** is the modern arrangement: Play holds the *app signing key*; you hold an *upload key*. If the upload key is compromised it can be replaced without users needing to reinstall — which was impossible before.
+
+The consequence that catches teams out: the certificate fingerprint users' devices see is **Play's**, not yours. That fingerprint is what belongs in `assetlinks.json` for App Links (ch. 6) and in any API console keyed by signing certificate.
+
+**Signature schemes v1–v4** (ch. 2). Modern builds use v2+ automatically. **Key rotation** is possible with v3.
+
+**Secrets in CI** come from the CI provider's secret store, decoded at build time into a temporary file, and never logged.
+
+## CI pipelines
+
+The stage ladder, cheapest and most informative first:
+
+```
+compile → lint / detekt / ktlint → unit + Robolectric → screenshot →
+assemble → instrumented → benchmark → publish
+```
+
+**PR time versus merge time.** A PR check must stay fast enough that people wait for it — roughly ten minutes. Everything through screenshot tests belongs there. Instrumented suites and benchmarks (ch. 11, ch. 18) run on merge or nightly.
+
+**Caching strategy** is what makes CI fast: cache the Gradle user home and the build cache directory, keyed on the lock and catalog files.
+
+**Matrix builds** for API levels and device configurations, on the slower stages only.
+
+**Required checks** enforce the gate. A check that can be ignored is documentation.
+
+## Static analysis
+
+**Android Lint** knows Android-specific problems — a missing `contentDescription` (ch. 19), a wrong API level (ch. 20), an unsafe `PendingIntent` (ch. 10). Custom lint rules encode your own conventions so review does not have to.
+
+**detekt / ktlint** for Kotlin style and complexity, with formatting auto-applied so it is never discussed in review.
+
+**Metalava or binary-compatibility-validator** for a library module, so a public API change is a deliberate, reviewable diff rather than an accident.
+
+**Dependency and vulnerability checks** (ch. 10), plus **secret scanning** so a key never reaches the repository in the first place.
+
+**Architecture rules in code** — the module-graph check above — because a rule enforced by a build is a rule; a rule in a wiki is a hope.
+
+## CD
+
+**Firebase App Distribution** for internal builds, from CI on every merge.
+
+**The Play Publishing API**, usually via Gradle Play Publisher, uploads from CI:
+
+```bash
+./gradlew publishProdReleaseBundle --track internal
+```
+
+**Tracks** are a ladder: internal (immediate, small group), closed (a testing cohort), open (public beta), production.
+
+**Staged rollout** releases to a percentage. Chapter 20 covers what to watch at each stage and when to halt.
+
+**`versionCode` strategy** — a monotonically increasing integer, ideally derived from CI build number or commit count rather than hand-edited.
+
+**Reproducible release from a tag** is the property to aim for: given a tag, CI produces the artifact, with no local steps and no machine-specific state. If a release requires someone's laptop, you do not have a release process.
+
+## Failure modes: Gradle & CI/CD
+
+**Every build recompiles everything.** *Symptom:* no task is ever `UP-TO-DATE`. *Cause:* a custom task with undeclared inputs, or `api` used everywhere. *Fix:* declare inputs and outputs; default to `implementation`.
+
+**The configuration phase takes 30 seconds before anything compiles.** *Symptom:* slow even for a one-module change. *Cause:* configuration cache disabled, often by `allprojects {}`. *Fix:* remove cross-project configuration; enable the cache.
+
+**A release-only crash reaches production.** *Symptom:* R8 breakage found by users. *Cause:* release is the first R8 build anyone ran. *Fix:* a `minifyEnabled` debug variant, in CI.
+
+**App Links work in debug, not from Play.** *Symptom:* verification fails in production only. *Cause:* `assetlinks.json` has the upload key, not the Play App Signing key (ch. 6). *Fix:* take the fingerprint from Play Console.
+
+**CI is green and the app is broken.** *Symptom:* bugs the suite should catch. *Cause:* the expensive stages are non-blocking, so failures are ignored. *Fix:* make the gate required, and keep it fast enough to stay required.
+
+**A dependency bump changes behaviour nobody reviewed.** *Symptom:* a permission or provider appears (ch. 6, ch. 11). *Cause:* no merged-manifest diff in review. *Fix:* print the merged manifest in CI and diff it.
+
+**Builds are fast locally and slow in CI.** *Symptom:* a large gap for the same work. *Cause:* no build cache, or a cache key that never hits. *Fix:* remote build cache; verify the hit rate in a scan.
+
+## Cheat-sheet: Gradle & CI/CD
+
+```bash
+./gradlew assembleDebug --scan          # where did the time go
+./gradlew :app:dependencies --configuration releaseRuntimeClasspath
+./gradlew :app:assembleRelease --dry-run    # what would run, without running it
+./gradlew help --task :app:assembleRelease
+./gradlew --stop                        # restart the daemon (before reaching for clean)
+```
+
+```properties
+# gradle.properties — the four that matter most
+org.gradle.configuration-cache=true
+org.gradle.caching=true
+org.gradle.parallel=true
+org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g
+```
+
+| Symptom | First check |
+|---|---|
+| nothing is up-to-date | custom task inputs |
+| slow configuration | `allprojects`, configuration cache off |
+| one change rebuilds everything | `api` instead of `implementation` |
+| slow annotation processing | kapt instead of KSP |
+| release-only bug | no R8 debug variant |
+
+<LabCard module=":ch23-gradle">
+Convert a single-module app into `:app` plus two feature and two core modules, with convention plugins in `build-logic`. Then prove the modularisation was worth it: take a build scan before and after, and **cut CI wall-clock time measurably** — if it did not drop, the graph is the wrong shape or `api` is leaking. Finish by publishing to an internal track from CI, triggered by a tag, with no local steps.
+</LabCard>
+
+## Crash &amp; ANR reporting
+
+**Symbolisation first**, because an unsymbolised report is unactionable. R8 renamed everything (ch. 2, ch. 11), so a stack trace of `a.b.c()` means nothing without the **mapping file** produced by that exact build. Upload it in CI, automatically — a mapping file that lives on someone's laptop is a mapping file you will not have. Native crashes need debug symbols too (appendix B).
+
+**Grouping and de-duplication** turn thousands of reports into a handful of issues. Grouping is heuristic and imperfect: one bug can appear as several issues, and unrelated crashes can merge. When triaging, check whether a "new" issue is a re-grouping of a known one.
+
+**Crash-free users as an SLO.** Not crash *count* — a single user crash-looping produces hundreds of reports. Crash-free users measures how many people had a good session, which is the thing you care about. Pick a target (99.5 % is a common starting point), and treat a breach as a release blocker.
+
+**Prioritise by impact, not by count:** users affected × severity. A crash on a rarely-used settings screen affecting 50 people is not the same as one on launch affecting 5 000, even if the counts look similar.
+
+**Non-fatals** are the underused half. Errors you caught and handled — a failed sync, an unexpected server response (ch. 16) — recorded rather than swallowed. They are how you learn about problems that never crash.
+
+**Breadcrumbs and custom keys make a stack trace diagnosable.** A trace tells you where; it does not tell you what the user was doing:
+
+```kotlin
+crashlytics.setCustomKey("screen", "ArticleDetail")
+crashlytics.setCustomKey("offline_queue_size", outbox.size())    // ch. 17
+crashlytics.log("sync started: delta from cursor")
+```
+
+Choose these deliberately. The right question is: *when this crashes at 3 a.m., what will I wish I knew?*
+
+**ANR clustering** works similarly, and the top frame of the main thread is where you start (ch. 12). Play Vitals reports ANR rate against the bad-behaviour threshold, and exceeding it reduces your store visibility — a performance problem with a distribution consequence.
+
+## Logging discipline
+
+**Timber** over raw `Log`, because it lets you route logs: verbose in debug, and in release forward warnings and errors to your crash reporter as breadcrumbs.
+
+**Strip logs in release.** R8 can remove `Log` calls entirely with an `-assumenosideeffects` rule, so a debug log costs nothing in production and cannot leak.
+
+**Never log PII or tokens.** Chapter 16 covered redaction; the addition here is to enforce it — a CI check that greps for logging of known-sensitive field names catches the accidental case before it ships.
+
+**Structured logs** — key-value rather than interpolated prose — are searchable and aggregatable. `log("sync_failed", "reason" to reason, "attempt" to n)` beats `log("Sync failed because $reason on attempt $n")`.
+
+**A log-and-upload path** for user-reported bugs: an in-app "report a problem" that attaches a recent, redacted log buffer. This is often the only way to diagnose a bug affecting one user on one device.
+
+## Metrics &amp; analytics
+
+**Design the event taxonomy before instrumenting.** Analytics added ad hoc becomes unanalysable within months: three events for the same action with different names, properties that mean different things in different places, and nobody who knows which to trust.
+
+A taxonomy needs, for every event: a **name** in a consistent convention (`object_action` — `article_opened`), a defined set of **properties** with types, an **owner**, and a written **definition** of when it fires.
+
+**Cardinality discipline.** A property with unbounded values — a user id, a URL, a timestamp — makes aggregation impossible and costs money in most analytics backends. Bucket instead: `article_id` is high cardinality; `article_category` is useful.
+
+**Product analytics and engineering telemetry are different things** with different consumers and different retention. Funnels and feature adoption serve product decisions; latency, error rates and crash rates serve engineering. Conflating them produces a system that answers neither well.
+
+**Sampling** is fine for high-volume telemetry — trace one session in a hundred — but never for crashes, where the rare event is the point.
+
+## Tracing in the field
+
+**Custom trace sections** (ch. 11) work in release builds, so a Perfetto trace captured from a real device shows your own spans, not just framework internals:
+
+```kotlin
+trace("ArticleRepository.sync") { repository.sync() }
+```
+
+**Firebase Performance** or a similar tool collects custom traces across your install base, which is how you learn that a screen is slow only on Android 12, or only in one country because of network conditions.
+
+**Correlate client to server.** Send a request id header, log it on both sides (ch. 16), and record it in your crash breadcrumbs. A client-side failure then leads directly to the server trace for the same request — which is the difference between a five-minute diagnosis and a fruitless afternoon.
+
+## Feature flags &amp; remote config
+
+The capability that makes releasing safe: **change behaviour without shipping**.
+
+The flag lifecycle is **create → roll out → remove**, and the third step is the one teams skip. Flags accumulate; every one doubles the theoretical configuration space, and after a year nobody knows which combinations are tested. Put an expiry on every flag, and a task to delete it.
+
+**Kill switches** are the most valuable kind. A new feature behind a flag can be disabled in minutes when it misbehaves, rather than waiting for a release, review and rollout — which on Android means days for most users. Every non-trivial feature should ship with one.
+
+**Default values and offline behaviour.** Remote config is fetched, cached, and may be unavailable — on first launch, or offline (ch. 17). The **defaults compiled into the app are what a user gets in those cases**, so they must be a safe, working configuration, not placeholders.
+
+**Test both sides of every flag.** A flag with an untested off-path is a kill switch that will not work when you need it — which is precisely when you cannot test it.
+
+## Release process
+
+**Staged rollout** is the core safety mechanism: release to a percentage and watch before proceeding.
+
+<Diagram
+  caption="A rollout is a series of gates, not a switch. The thresholds are decided before the release, because deciding them during an incident produces arguments rather than decisions."
+  label="Staged rollout diagram: a release moves from internal to one percent, five to ten percent, twenty to fifty percent and finally one hundred percent, with a gate at each stage checking crash-free users and ANR rate against a threshold, and a halt path back to the previous version if a threshold is breached."
+>
+  <svg viewBox="0 0 660 236" width="660" height="236">
+    <rect x="12" y="40" width="108" height="42" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="66" y="60" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">internal</text>
+    <text x="66" y="74" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-muted)">does it launch</text>
+
+    <rect x="148" y="40" width="108" height="42" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="202" y="60" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">1 percent</text>
+    <text x="202" y="74" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-muted)">new crash clusters</text>
+
+    <rect x="284" y="40" width="108" height="42" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="338" y="60" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">5 to 10</text>
+    <text x="338" y="74" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-muted)">crash-free, vitals</text>
+
+    <rect x="420" y="40" width="108" height="42" rx="7" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="474" y="60" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">20 to 50</text>
+    <text x="474" y="74" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-muted)">performance, business</text>
+
+    <rect x="556" y="40" width="92" height="42" rx="7" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="602" y="60" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">100</text>
+    <text x="602" y="74" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-muted)">watch a week</text>
+
+    <path d="M120 61h28M256 61h28M392 61h28M528 61h28" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M140 55 L148 61 L140 67M276 55 L284 61 L276 67M412 55 L420 61 L412 67M548 55 L556 61 L548 67" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="134" y="34" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-ok)">gate</text>
+    <text x="270" y="34" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-ok)">gate</text>
+    <text x="406" y="34" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-ok)">gate</text>
+    <text x="542" y="34" text-anchor="middle" font-family="var(--font-ui)" font-size="9" fill="var(--dg-ok)">gate</text>
+
+    <rect x="180" y="130" width="300" height="48" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="330" y="150" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">HALT — threshold breached</text>
+    <text x="330" y="166" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">stop the rollout, or use the kill switch</text>
+
+    <path d="M202 82 L202 130M338 82 L338 130M474 82 L474 130" fill="none" stroke="var(--dg-warn)" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+    <text x="330" y="206" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">A kill switch acts in minutes; a new release takes days to reach most users —</text>
+    <text x="330" y="224" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">which is why every non-trivial feature ships with one.</text>
+  </svg>
+</Diagram>
+
+| Stage | Watch for |
+|---|---|
+| Internal | does it launch, obvious breakage |
+| 1 % | new crash clusters, ANR rate |
+| 5–10 % | crash-free users vs baseline, vitals |
+| 20–50 % | performance regressions (ch. 11), business metrics |
+| 100 % | continue watching for a week |
+
+**Automated halt criteria** decided in advance: crash-free users below X, ANR rate above Y, and the rollout stops automatically. Deciding thresholds during an incident produces arguments rather than decisions.
+
+**The hotfix path** should be rehearsed rather than improvised — branch from the release tag, cherry-pick, expedited review. Practise it when nothing is broken.
+
+**In-app updates** come in two forms: *flexible* downloads in the background and prompts to restart; *immediate* blocks until updated. Immediate is for genuine incompatibility only, because it stops the user doing what they opened the app to do.
+
+**Forced upgrades must not brick old clients.** A server that stops supporting an old API version strands every user who cannot or will not update. Version your API, support old versions for a defined window, and if you must force an upgrade, show a screen explaining it rather than crashing or hanging.
+
+## Experimentation
+
+**A/B tests need stable assignment.** A user must stay in the same variant across sessions and across process death (ch. 5) — assignment derived from a stable id, persisted, not recomputed. Otherwise a user sees both variants and your results are noise.
+
+**Guardrail metrics** run alongside the metric you are trying to move: crash rate, ANR rate, startup time, retention. A variant that improves conversion by 2 % and increases crashes by 1 % is not a win, and without guardrails you would ship it.
+
+**Client-side experiments interact badly with caching** (ch. 17). If a variant changes what is fetched, a user switching variants — or an assignment arriving after data is cached — sees a mix. Decide variant before the first fetch, and key caches by variant where it matters.
+
+## Play Console as an engineering tool
+
+Not just a publishing form.
+
+**Vitals** reports crash rate, ANR rate, excessive wakeups, stuck partial wakelocks and startup time across your real install base, with thresholds. Exceeding them reduces your visibility in the store.
+
+**Pre-launch reports** run your app on real devices before release, catching crashes and accessibility problems (ch. 19) automatically.
+
+**Device and exclusion rules** let you exclude devices your app genuinely cannot support, rather than accumulating one-star reviews from users it will never work for.
+
+**Reviews are a bug source**, and an underused one. A cluster of reviews mentioning the same screen is a signal your telemetry may be missing entirely.
+
+**Policy rejections** (ch. 10) — data safety, permissions, background location — are a release blocker with a slow appeal loop, so treat them as a pre-submission checklist.
+
+## Debugging without a repro
+
+The skill this chapter builds toward.
+
+**Start from the population.** Which versions, API levels, OEMs, locales? A crash confined to one manufacturer is a vendor issue (ch. 20); one confined to a locale is often a formatting or RTL bug (ch. 19); one confined to a version is a regression you can bisect.
+
+**Read the breadcrumbs for the sequence**, not just the stack. What screen, what action, what state.
+
+**Form a hypothesis, then reproduce deliberately** — the right API level in an emulator, the right locale, the right network conditions, and the state from the breadcrumbs. Chapter 5's `am kill` and chapter 9's `deviceidle` are how you force conditions rather than waiting for them.
+
+**Write the regression test before the fix.** It proves you understood the bug, and it stops the bug returning. A fix without a test is a guess that happened to work.
+
+**Then write the post-mortem** — what happened, why it was not caught, what changes so this class of bug cannot recur. The last part is what makes it worth writing; a timeline with no systemic change is a diary entry.
+
+## Failure modes: Release & observability
+
+**Crash reports are unreadable obfuscated frames.** *Symptom:* stack traces of `a.b.c`. *Cause:* the mapping file was not uploaded for that build. *Fix:* automate upload in CI; native symbols too.
+
+**Crash counts look fine while users complain.** *Symptom:* metrics disagree with reviews. *Cause:* counting crashes, not affected users; or non-fatals never recorded. *Fix:* crash-free users as the SLO; record handled errors.
+
+**A crash cannot be diagnosed from its report.** *Symptom:* a clear stack trace nobody can act on. *Cause:* no breadcrumbs or custom keys. *Fix:* record screen, state and the last few actions.
+
+**A bad release reaches everyone before anyone notices.** *Symptom:* a widespread incident. *Cause:* full rollout with no staging or halt criteria. *Fix:* staged rollout with thresholds decided in advance.
+
+**A kill switch does not work.** *Symptom:* the flag is turned off and behaviour does not change. *Cause:* the off-path was never tested, or the cached default is wrong. *Fix:* test both sides; safe compiled defaults.
+
+**An A/B test produces meaningless results.** *Symptom:* variants that do not separate. *Cause:* unstable assignment across sessions or process death. *Fix:* persist assignment from a stable id.
+
+**An old client is stranded by an API change.** *Symptom:* users on an old version cannot use the app and cannot always update. *Cause:* an unversioned API change. *Fix:* version the API; support a window; a clear upgrade screen.
+
+## Cheat-sheet: Release & observability
+
+```kotlin
+// make the stack trace diagnosable
+crashlytics.setCustomKey("screen", screen)
+crashlytics.log("action: retry tapped")
+crashlytics.recordException(handledError)      // non-fatal: the underused half
+
+// a flag with a safe compiled default and a tested off-path
+remoteConfig.setDefaultsAsync(mapOf("new_feed_enabled" to false))
+```
+
+```bash
+adb shell dumpsys package <pkg> | grep versionCode
+adb pull /data/anr/traces.txt                  # main thread first (ch. 12)
+./gradlew publishProdReleaseBundle --track internal    # ch. 20
+```
+
+| Question | Where |
+|---|---|
+| how many users had a good session | crash-free users |
+| is this worth fixing first | users affected × severity |
+| what was the user doing | breadcrumbs and custom keys |
+| can I turn it off without a release | a kill switch, with a tested off-path |
+| is this device-specific | population breakdown by OEM and API level |
+| did we learn anything | the post-mortem's action items |
+
+<LabCard module=":ch24-observability">
+Instrument one feature end to end: put it behind a flag, roll it out to 5 %, seed a crash, catch it in Crashlytics, symbolise it, and kill-switch it without shipping a release. Then write the post-mortem — and make it a real one, with an action item that changes something systemic. The lab is not finished when the crash is fixed; it is finished when the class of bug cannot recur unnoticed.
+</LabCard>
+
+## The three SDK numbers
+
+Almost every "why does this only break on Android 14" question is answered here.
+
+| | Means | Changing it |
+|---|---|---|
+| **`minSdk`** | the oldest version you support | raising it drops users, enables APIs |
+| **`compileSdk`** | the SDK you compile against | should always be the latest stable |
+| **`targetSdk`** | the version whose behaviours you opt into | the risky one |
+
+**`compileSdk` is safe to raise.** It gives the compiler newer APIs and lets lint check against them. It does not change runtime behaviour.
+
+**`targetSdk` is a declaration to the system**: "I have tested against this version's behaviour, apply it to me." Raise it and the OS *stops* applying compatibility shims. That is why a bump changes behaviour with no code change — you did not add a bug, you stopped being exempted from one.
+
+**`minSdk` is a product decision** with an engineering consequence: every API newer than it needs a guard or a compat wrapper.
+
+<Diagram
+  caption="Three numbers on one axis. The gap between minSdk and compileSdk is where guards live; targetSdk decides which behaviours the system applies to you."
+  label="Diagram of the three SDK numbers on an API level axis: minSdk is the floor of supported devices, compileSdk is the ceiling of APIs you can call and should always be the latest, and targetSdk is the version whose behaviour changes the system applies. The span between minSdk and compileSdk is where version guards and compat wrappers are required."
+>
+  <svg viewBox="0 0 660 246" width="660" height="246">
+    <path d="M60 96 L620 96" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="60" y="118" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">API 24</text>
+    <text x="620" y="118" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-muted)">API 36</text>
+
+    <path d="M60 84 L60 108" fill="none" stroke="var(--dg-accent)" stroke-width="2"/>
+    <rect x="12" y="46" width="132" height="32" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="78" y="66" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-accent)">minSdk 24</text>
+    <text x="78" y="140" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">the oldest device</text>
+    <text x="78" y="154" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">you support</text>
+
+    <path d="M620 84 L620 108" fill="none" stroke="var(--dg-ok)" stroke-width="2"/>
+    <rect x="524" y="46" width="132" height="32" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="590" y="66" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">compileSdk 36</text>
+    <text x="590" y="140" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">what you may CALL —</text>
+    <text x="590" y="154" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">safe to raise, always latest</text>
+
+    <path d="M477 84 L477 108" fill="none" stroke="var(--dg-warn)" stroke-width="2"/>
+    <rect x="404" y="6" width="146" height="32" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="477" y="26" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">targetSdk 35</text>
+    <path d="M477 38 L477 84" fill="none" stroke="var(--dg-warn)" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <text x="477" y="176" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">which BEHAVIOURS apply to you.</text>
+    <text x="477" y="190" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">Raising it removes the shims —</text>
+    <text x="477" y="204" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">this is the risky one.</text>
+
+    <rect x="60" y="86" width="560" height="8" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-line)"/>
+    <text x="300" y="80" text-anchor="middle" font-family="var(--font-ui)" font-size="10.5" fill="var(--dg-muted)">every API in this span needs a guard or a compat wrapper</text>
+
+    <text x="330" y="232" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">Almost every "why does this only break on Android 14" question is a targetSdk question.</text>
+  </svg>
+</Diagram>
+
+## Behaviour changes gated on targetSdk vs applying to all apps
+
+The distinction that decides how urgent a change is.
+
+**Gated on `targetSdk`** — applies only when you raise it. You control the timing. Edge-to-edge enforcement (ch. 8, ch. 19) and foreground-service types (ch. 9) are examples.
+
+**Applying to all apps** — arrives with the OS update, regardless of your `targetSdk`. Nothing you can defer. Package visibility (ch. 6) applied broadly; some privacy changes do too.
+
+Read the release notes as two lists, because the second is the one that can break a shipped app without you touching it.
+
+**The compatibility framework** lets you test a gated change without a full bump. Developer options exposes per-app toggles for individual changes:
+
+```bash
+adb shell am compat enable <CHANGE_ID> <pkg>
+adb shell am compat disable <CHANGE_ID> <pkg>
+adb shell dumpsys platform_compat | grep -A3 <pkg>
+```
+
+That is how you test one behaviour change at a time rather than discovering fifteen at once.
+
+## Play's target-API requirement
+
+Play requires new apps and updates to target a recent API level — typically the previous year's release, with a deadline around August each year. Miss it and you cannot ship updates; existing installs continue but you are frozen.
+
+**Plan it as a project.** The failure mode is treating it as a one-line change in August: bump, ship, discover four behaviour changes in production. Instead:
+
+1. Bump `compileSdk` as soon as the SDK is stable, and fix what lint reports.
+2. Read both behaviour-change lists and enumerate what applies to you.
+3. Write a test for each one that applies.
+4. Bump `targetSdk` on an internal track (ch. 20) and let it soak.
+5. Staged rollout with vitals watched (ch. 20).
+
+The work is in steps 2 and 3; steps 1 and 4 are trivial. Teams that get hurt skipped step 2.
+
+## Writing version-aware code
+
+Four tools, roughly in order of preference.
+
+**Prefer an AndroidX compat wrapper.** It handles the version check and the fallback, tested across the matrix:
+
+```kotlin
+ContextCompat.getColor(context, R.color.brand)          // rather than a version check
+NotificationCompat.Builder(context, channelId)          // ch. 9
+WindowInsetsControllerCompat(window, view)              // ch. 19
+```
+
+**`SDK_INT` guards** where no wrapper exists:
+
+```kotlin
+if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    requestPermissions(arrayOf(POST_NOTIFICATIONS), CODE)   // ch. 9
+}
+```
+
+**`@RequiresApi` versus `@ChecksSdkIntAtLeast`** is a distinction worth knowing:
+
+```kotlin
+@RequiresApi(33)                                  // "callers must guard this"
+fun useNewApi() { ... }
+
+@ChecksSdkIntAtLeast(api = 33)                    // "I AM a guard" — teaches lint
+fun supportsNotificationsPermission() = Build.VERSION.SDK_INT >= 33
+```
+
+Without `@ChecksSdkIntAtLeast`, extracting a version check into a helper function breaks lint's `NewApi` analysis, and you lose the check that would have caught the unguarded call.
+
+**Feature detection over version detection** where possible. `packageManager.hasSystemFeature(...)` or a capability query is more accurate than a version number, because vendors vary.
+
+**Lint's `NewApi` check is your safety net** — it fails the build on an unguarded new API. Never suppress it without a comment explaining the guard it cannot see.
+
+## Desugaring
+
+**Core library desugaring** backports newer Java APIs to older devices, most usefully `java.time`:
+
+```kotlin
+compileOptions { isCoreLibraryDesugaringEnabled = true }
+dependencies { coreLibraryDesugaring(libs.desugar.jdk.libs) }
+```
+
+Without it, `java.time` requires API 26 and you are stuck with `Calendar`. With it, it works to `minSdk` 24 and below.
+
+**What it does not cover:** desugaring handles *language features* and a defined set of *library* APIs. It does not backport **framework** APIs — no amount of desugaring gives an Android 8 device a notification-permission dialog. That is the `SDK_INT` guard's job, and confusing the two is a common misunderstanding.
+
+## AndroidX &amp; dependency hygiene
+
+**The AndroidX contract:** semantic versioning, and a maturity channel in the version string — `alpha` (API may change), `beta` (API stable, bugs expected), `rc`, `stable`. Ship stable; use beta deliberately; treat alpha as a preview.
+
+**BOMs** pin a set of mutually compatible versions with one line, which removes a class of runtime crashes caused by mismatched library versions. Compose and Firebase both ship one.
+
+**Deprecations to plan for**, each with a migration in the last section:
+
+| Deprecated | Replacement |
+|---|---|
+| `AsyncTask` | coroutines (ch. 12) |
+| `LiveData` | `StateFlow` (ch. 12, ch. 14) |
+| Loaders | `ViewModel` + coroutines (ch. 5) |
+| DataBinding | ViewBinding + Compose (ch. 8) |
+| `SharedPreferences` | DataStore (ch. 15) |
+| Jetpack Security crypto | KeyStore directly (ch. 15, ch. 10) |
+| kapt | KSP (ch. 12, ch. 20) |
+
+**A strategy for staying current without a permanent migration project:** update dependencies on a schedule — monthly, in a dedicated change, reading changelogs — rather than opportunistically. Small regular updates are diagnosable; a year of updates at once is not. And when a library deprecates something, migrate at the *next* time you touch that code, not in a dedicated sweep.
+
+## Fragmentation in reality
+
+The part no API solves.
+
+**OEM skins** modify the framework. The most consequential are the **background killers** (ch. 9): several manufacturers kill background work far more aggressively than AOSP, so a perfectly-behaved app can have its work never run. You cannot fix it in code; you can detect the situation and offer to open battery settings, and be honest with users about what is happening.
+
+**Vendor bugs** exist and are usually undocumented. A crash confined to one manufacturer and one Android version is almost always one; the fix is a workaround guarded by a `Build.MANUFACTURER` check, which feels dirty and is correct.
+
+**WebView version skew** (appendix B) — WebView updates through Play independently of the OS, so its version is unrelated to `targetSdk` and varies across your install base.
+
+**Play services availability** — not present in every region or on every device (ch. 9). Any dependency on it needs a fallback or a clear failure.
+
+**Low-RAM (Go) devices** report `ActivityManager.isLowRamDevice()`, have smaller heaps (ch. 11) and are killed sooner (ch. 9). If they are meaningfully represented in your install base, test on one.
+
+**Build the device matrix from your own data.** Play Console tells you the actual distribution of your users by device, API level and locale. Testing the top devices from *your* install base is far more valuable than testing whatever is on the desk.
+
+## Migrations as a repeatable exercise
+
+Each of these has the same shape: a mechanical part, a risky part, and a way to do it incrementally.
+
+| Migration | Mechanical | Risky | Incremental path |
+|---|---|---|---|
+| Views → Compose | leaf composables | nested scroll, theme parity (ch. 8) | screen by screen behind a flag |
+| `LiveData` → `Flow` | `asFlow()` | lifecycle collection — needs `repeatOnLifecycle` (ch. 5) | one screen at a time |
+| kapt → KSP | swap the plugin | a library without KSP support | per processor |
+| Groovy → Kotlin DSL | file by file | dynamic Groovy that has no typed equivalent | module by module |
+| Gson → kotlinx | annotate models | default and nullability differences (ch. 16) | per endpoint, with round-trip tests |
+| Dagger → Hilt | replace components | custom scopes and components | module by module |
+
+**The general rule: never migrate a working thing for its own sake.** Migrate when you are already changing that code, or when the old thing is actively costing you. A migration undertaken for tidiness competes with product work and usually stalls half-finished — and a half-finished migration is worse than either end state, because now the team must know both.
+
+**Behind a flag** (ch. 20) is what makes a risky migration safe: ship both, switch a percentage, watch vitals, and keep the ability to revert without a release.
+
+## Failure modes: Compatibility
+
+**Something breaks only after a `targetSdk` bump.** *Symptom:* new crashes with no functional change. *Cause:* a behaviour change you opted into. *Fix:* enumerate the gated changes; test each with `am compat` before bumping.
+
+**Something breaks with no release at all.** *Symptom:* an app in the field starts failing after users update Android. *Cause:* a change that applies to all apps regardless of `targetSdk`. *Fix:* read that list every release; keep a kill switch (ch. 20).
+
+**A crash confined to one manufacturer.** *Symptom:* one OEM, one version, unreproducible elsewhere. *Cause:* a vendor bug. *Fix:* a guarded workaround; check the population breakdown first (ch. 20).
+
+**Background work never runs on some phones.** *Symptom:* device-specific reports. *Cause:* an OEM battery killer (ch. 9). *Fix:* offer battery settings; be honest.
+
+**Lint stops catching unguarded new APIs.** *Symptom:* `NoSuchMethodError` on older devices despite a green build. *Cause:* a version check extracted into a helper without `@ChecksSdkIntAtLeast`. *Fix:* annotate the helper.
+
+**`java.time` crashes on older devices.** *Symptom:* `NoClassDefFoundError` below API 26. *Cause:* core library desugaring not enabled. *Fix:* enable it — and remember it does not backport framework APIs.
+
+**A migration is half-finished a year later.** *Symptom:* two patterns in the codebase, both maintained. *Cause:* a migration for its own sake, competing with product work. *Fix:* migrate code you are already touching; finish or revert.
+
+## Cheat-sheet: Compatibility
+
+```bash
+# test one behaviour change at a time
+adb shell am compat enable <CHANGE_ID> <pkg>
+adb shell dumpsys platform_compat | grep -A3 <pkg>
+
+# what am I actually running against
+adb shell getprop ro.build.version.sdk
+adb shell getprop ro.product.manufacturer
+adb shell dumpsys package <pkg> | grep -E "targetSdk|minSdk"
+```
+
+```kotlin
+// prefer a compat wrapper
+NotificationCompat.Builder(context, channelId)
+
+// teach lint that your helper IS a guard
+@ChecksSdkIntAtLeast(api = 33)
+fun supportsNotificationPermission() = Build.VERSION.SDK_INT >= 33
+```
+
+| Number | Change it when |
+|---|---|
+| `compileSdk` | as soon as the SDK is stable — always latest |
+| `targetSdk` | after enumerating and testing the behaviour changes |
+| `minSdk` | when your install-base data says the users are gone |
+
+<LabCard module=":ch25-compatibility">
+Bump `targetSdk` on a sample app as a project rather than a one-line change. Enumerate every behaviour change that applies, write a test for each, and use `am compat` to verify them one at a time before the bump. The deliverable is not the bump — it is **the migration checklist as a document**, because you will do this every year and the second time should be cheaper than the first.
+</LabCard>

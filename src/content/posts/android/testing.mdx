@@ -1,0 +1,323 @@
+---
+title: "Testing"
+navTitle: "Testing"
+summary: "What a test costs, the seams that make code testable, coroutines under test, fakes over mocks, and flakiness as a bug."
+readingTime: "2 hours"
+minutes: 125
+tags: ["test pyramid","robolectric","instrumented test","runtest","turbine","testdispatcher","fakes","mockk","activityscenario","mockwebserver","migrationtesthelper","espresso","compose test","uiautomator","robot pattern","paparazzi","roborazzi","property based","flakiness","gradle managed devices"]
+draft: true
+date: "2026-08-01"
+subtopic: "android-internals"
+subtopicOrder: 18
+part: "III"
+verifiedAgainst: "JUnit 4.13 · Robolectric 4.16 · Compose BOM 2026.09"
+stage: "outline"
+labModule: ":ch18-testing"
+sources: ["22-automated-testing#The pyramid, adapted to Android","22-automated-testing#Making code testable","22-automated-testing#Unit testing","22-automated-testing#Test doubles","22-automated-testing#The framework layer","22-automated-testing#UI testing","22-automated-testing#Screenshot testing","22-automated-testing#Beyond example-based tests","22-automated-testing#Flakiness as a first-class bug","22-automated-testing#Scale &amp; CI","22-automated-testing#Failure modes","22-automated-testing#Cheat-sheet"]
+---
+A test is not free. It is code you maintain, minutes you wait, and — when it fails for the wrong reason — trust you lose.
+
+So the question is not "how do I test this" but **what makes a test worth its cost**. Three properties: it runs **fast** enough that you run it, it is **deterministic** enough to be believed, and it fails for a **reason you care about** rather than because an implementation detail changed.
+
+A test that is slow, flaky, or coupled to internals is worse than no test, because it trains the team to ignore red.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## The pyramid, adapted to Android
+
+| Level | Speed | Fidelity | Aim for |
+|---|---|---|---|
+| **Unit (JVM)** | milliseconds | none — pure logic | most of them |
+| **Robolectric** | tens of ms | framework approximated | a lot |
+| **Instrumented** | seconds each | real device | the ones that need it |
+| **UI / E2E** | tens of seconds | everything | a handful |
+
+The ratio matters because of arithmetic. A thousand instrumented tests at three seconds each is fifty minutes per run on one device — so it moves to nightly, so it stops gating merges, so it stops preventing bugs. "Test everything on a device" collapses at scale, not because device tests are bad but because they are slow and share state.
+
+The right split follows from what each level can *only* it can catch. Business logic needs no framework. Anything touching resources, `Bundle`s or the manifest can use Robolectric. Only things where the approximation genuinely fails — real rendering, real hardware, cross-app interaction — need a device.
+
+<Diagram
+  caption="Speed and fidelity trade against each other, and the cost is per run, every run. A suite weighted at the top stops gating merges, which is when it stops preventing bugs."
+  label="Test pyramid for Android: many fast JVM unit tests at the base, a large layer of Robolectric tests, fewer instrumented tests on a device, and a handful of end-to-end tests at the top, with speed decreasing and fidelity increasing as you go up."
+>
+  <svg viewBox="0 0 660 250" width="660" height="250">
+    <rect x="230" y="26" width="200" height="36" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="330" y="49" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-warn)">UI / E2E — a handful</text>
+    <rect x="186" y="68" width="288" height="36" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="330" y="91" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">INSTRUMENTED — the ones that need a device</text>
+    <rect x="142" y="110" width="376" height="36" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="330" y="133" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">ROBOLECTRIC — resources, Bundles, lifecycle</text>
+    <rect x="98" y="152" width="464" height="36" rx="6" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="330" y="175" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-ok)">JVM UNIT — logic, mappers, ViewModel state. MOST OF THEM</text>
+
+    <path d="M76 176 L76 40" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <path d="M70 48 L76 40 L82 48" fill="none" stroke="var(--dg-ok)" stroke-width="1.5"/>
+    <text x="76" y="200" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-ok)">ms</text>
+    <text x="76" y="36" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-warn)">tens of seconds</text>
+    <text x="20" y="112" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">SLOWER</text>
+
+    <path d="M584 176 L584 40" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M578 48 L584 40 L590 48" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="584" y="200" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">no framework</text>
+    <text x="584" y="36" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">everything real</text>
+    <text x="596" y="112" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">FIDELITY</text>
+
+    <text x="330" y="222" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">A thousand instrumented tests at three seconds each is fifty minutes per run —</text>
+    <text x="330" y="240" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">so it moves to nightly, so it stops gating merges, so it stops preventing bugs.</text>
+  </svg>
+</Diagram>
+
+## Making code testable
+
+The largest single factor in testing cost is not the test framework. It is whether the code has seams, and every one comes from an earlier chapter.
+
+- **Constructor injection** (ch. 14) — the seam for every dependency.
+- **No static mutable state** (ch. 14) — shared state makes tests order-dependent.
+- **No `Context` in the domain layer** (ch. 14) — a `Context` forces Robolectric.
+- **Inject dispatchers** (ch. 12) — a hardcoded `Dispatchers.IO` cannot be controlled.
+- **Inject the clock** — `System.currentTimeMillis()` makes time-dependent logic untestable.
+- **Seams for network and storage** — a `FakeApi` and an in-memory Room database.
+
+```kotlin
+class FeedViewModel(
+    private val repo: ArticleRepository,     // an interface — fake it
+    private val clock: Clock = Clock.systemUTC(),
+    private val io: CoroutineDispatcher = Dispatchers.IO,
+) : ViewModel()
+```
+
+If a test is hard to write, that is information about the design, not about testing.
+
+## Unit testing
+
+**JUnit4** remains the default on Android because the instrumentation runner is built on it; JUnit5 works on the JVM but not for instrumented tests, so mixing adds complexity for modest gain.
+
+**Truth** or Kotest give assertion messages that explain the failure rather than "expected true, was false".
+
+**Testing a `ViewModel`'s state stream** is the most common Android unit test, and `runTest` plus Turbine make it readable:
+
+```kotlin
+@Test fun `shows content after a successful load`() = runTest {
+    val repo = FakeArticleRepository()
+    val vm = FeedViewModel(repo, dispatcher = StandardTestDispatcher(testScheduler))
+
+    vm.state.test {
+        assertThat(awaitItem()).isEqualTo(Loading)
+        repo.emit(listOf(article))
+        assertThat(awaitItem()).isInstanceOf(Content::class.java)
+        cancelAndIgnoreRemainingEvents()
+    }
+}
+```
+
+**Virtual time** is what makes chapter 12's timing logic testable: `advanceTimeBy(300)` skips a debounce instantly, so a test covering a 30-second backoff runs in a millisecond.
+
+**`Dispatchers.setMain`** replaces the main dispatcher, which has no Looper under a unit test:
+
+```kotlin
+@get:Rule val mainDispatcherRule = MainDispatcherRule()   // setMain in before, resetMain in after
+```
+
+**Test cancellation explicitly** — that a coroutine stops when its scope is cancelled is behaviour worth asserting, since chapter 12 showed how easily it is broken.
+
+## Test doubles
+
+Chapter 14 argued for fakes; this is the fuller picture.
+
+| Double | Is | Use |
+|---|---|---|
+| **Fake** | a working implementation, simplified | the default |
+| Stub | returns canned values | trivial cases |
+| Mock | records and verifies calls | when the *interaction* is the requirement |
+
+**A fake encodes invariants** a mock cannot. A `FakeArticleDao` backed by a `MutableStateFlow` behaves like a database: insert then observe, and the observer fires. A mock returns whatever you told it to, including impossible sequences.
+
+**Where a mock is still right:** verifying an interaction that *is* the requirement — "exactly one analytics event is sent per screen view", "the token endpoint is called once under ten parallel requests" (ch. 16). There, the call is the behaviour.
+
+**Fake the clock and randomness**, or tests that depend on them are non-deterministic by construction:
+
+```kotlin
+val clock = Clock.fixed(Instant.parse("2026-09-04T10:00:00Z"), ZoneOffset.UTC)
+```
+
+## The framework layer
+
+**Robolectric** runs Android framework code on the JVM using *shadows* — reimplementations of framework classes. Fast enough to run on every save, and good enough for resources, `Bundle`s, `SharedPreferences` and most lifecycle work. Its limits are real: rendering is approximated, some framework internals are unimplemented, and a passing Robolectric test does not prove a device behaves the same.
+
+**`ActivityScenario`** drives lifecycle deterministically — the only sane way to test chapter 5's transitions:
+
+```kotlin
+@Test fun `survives process death`() {
+    val scenario = ActivityScenario.launch(MainActivity::class.java)
+    scenario.onActivity { it.viewModel.onQueryChanged("android") }
+    scenario.recreate()                                  // simulates recreation
+    scenario.onActivity { assertThat(it.viewModel.query.value).isEqualTo("android") }
+}
+```
+
+`recreate()` covers configuration change. For true process death, the saved-state bundle is what matters — `SavedStateHandle` tests plus a manual `am kill` check (ch. 5).
+
+**Room in-memory databases** make persistence tests fast, and **`MigrationTestHelper`** is non-negotiable (ch. 15).
+
+**MockWebServer** for HTTP: a real server on localhost, so you test your actual client stack including interceptors, with scripted responses, delays and failures.
+
+**WorkManager's `TestDriver`** lets you satisfy constraints and advance time, so chapter 9's work is testable without waiting for Doze.
+
+## UI testing
+
+**Compose testing** queries the semantics tree (ch. 13, ch. 19), which is the same tree accessibility services use:
+
+```kotlin
+composeTestRule.onNodeWithText("Try again").performClick()
+composeTestRule.onNodeWithTag("results").assertIsDisplayed()
+```
+
+The rule **auto-syncs**: it waits for composition and animations to settle before each assertion, which removes most of the flakiness Espresso needed idling resources for. Where something never settles — an infinite animation — disable auto-sync and advance the clock manually.
+
+**Espresso** for Views. Its flakiness sources are worth naming: animations (disable them on test devices), asynchronous work with no idling resource, and shared state between tests.
+
+```bash
+adb shell settings put global window_animation_scale 0
+adb shell settings put global transition_animation_scale 0
+adb shell settings put global animator_duration_scale 0
+```
+
+**UiAutomator** for anything outside your app — permission dialogs, the notification shade (ch. 9), cross-app flows.
+
+**The robot pattern** keeps UI tests readable and cheap to maintain by separating *what* from *how*:
+
+```kotlin
+@Test fun retryAfterFailure() {
+    feed {
+        openWithError()
+        tapRetry()
+    } verify {
+        articlesAreShown()
+    }
+}
+```
+
+When a layout changes, one robot changes rather than forty tests.
+
+## Screenshot testing
+
+**Paparazzi** renders composables on the JVM with no device or emulator, which is what makes screenshot testing practical rather than an ordeal. **Roborazzi** does the same via Robolectric.
+
+The workflow: render, compare to a committed golden, fail on difference, and review the diff like any code change.
+
+The value is chapter 19's matrix — theme, locale, font scale — captured cheaply:
+
+```kotlin
+@Test fun feedRow_largeFont() = paparazzi.snapshot(deviceConfig = PIXEL_5.copy(fontScale = 2f)) {
+    AppTheme { ArticleRow(article) }
+}
+```
+
+**The maintenance trap is real.** Every golden is a file to review and re-record. A hundred goldens across five configurations is five hundred images, and a padding change re-records all of them — after which nobody reviews the diffs. Golden the components where visual regression genuinely matters, at the configurations that genuinely differ.
+
+## Beyond example-based tests
+
+**Property-based testing** asserts an invariant over generated inputs rather than one example — ideal for mappers and reducers:
+
+```kotlin
+checkAll(Arb.article()) { article ->
+    article.toEntity().toDomain() shouldBe article        // round-trip for ALL articles
+}
+```
+
+**Fuzzing a parser** with malformed input finds the crash a hostile server or corrupt file would cause.
+
+**Snapshot-testing a state machine** — feed a sequence of events, assert the resulting state — is a compact way to cover a reducer.
+
+**Concurrency stress tests** repeat an interleaving many times to surface a race. Chapter 16's single-flight token refresh and chapter 17's outbox ordering both deserve one.
+
+## Flakiness as a first-class bug
+
+A flaky test is worse than a missing one: it consumes attention and teaches people to re-run rather than investigate.
+
+**The causes**, in rough order of frequency: real timing (a `Thread.sleep` instead of an idling condition), animations, shared state between tests, real network access, and emulator instability.
+
+**Quarantine, but with an expiry.** Moving a flaky test out of the gating suite is reasonable; leaving it there forever means it is dead code. Quarantine with an owner and a date.
+
+**Retries hide real bugs.** A test that passes on the third attempt may be reporting a genuine race in your code. Automatic retry converts a real defect into noise.
+
+**Measure flake rate** — pass rate per test over time. Without the number, "that test is flaky" is folklore and nobody knows whether it is getting worse.
+
+## Scale &amp; CI
+
+**Gradle Managed Devices** define emulators in your build config, so CI and local runs use identical images — removing "works on my emulator".
+
+**Firebase Test Lab** runs on real hardware across a device matrix; the right place for the small set of tests that need physical devices.
+
+**Sharding** splits instrumented tests across parallel devices; wall-clock time drops roughly linearly.
+
+**Android Test Orchestrator** runs each test in its own process instance, so a crash does not take down the run and state does not leak between tests. Slower per test, dramatically less flaky.
+
+**Coverage is a signal, not a target.** JaCoCo or Kover tells you what is untested, which is useful. A coverage *target* produces tests written to touch lines rather than to assert behaviour.
+
+**What to run when:**
+
+| Stage | Runs |
+|---|---|
+| Every PR | lint, detekt, unit tests, Robolectric, screenshot tests |
+| Merge | plus a subset of instrumented tests |
+| Nightly | full instrumented suite, benchmarks (ch. 11), Test Lab matrix |
+
+The PR stage must stay under about ten minutes, or people stop waiting for it.
+
+## Failure modes: Testing
+
+**A test suite nobody trusts.** *Symptom:* red builds re-run rather than investigated. *Cause:* accumulated flakiness. *Fix:* measure flake rate; quarantine with owners; fix the causes rather than retrying.
+
+**Tests pass individually and fail together.** *Symptom:* order-dependent failures. *Cause:* shared static state, or a database not reset. *Fix:* Orchestrator; remove static state (ch. 14).
+
+**A refactor breaks fifty tests that changed no behaviour.** *Symptom:* mass `verify` failures. *Cause:* mocks asserting implementation. *Fix:* fakes and outcome assertions (ch. 14).
+
+**A test needs a real network.** *Symptom:* CI fails when an external service is down. *Cause:* no seam. *Fix:* MockWebServer.
+
+**A timing test is flaky.** *Symptom:* intermittent failures on a debounce or timeout. *Cause:* real delays and `Thread.sleep`. *Fix:* `runTest` virtual time (ch. 12).
+
+**Screenshot tests are always red.** *Symptom:* goldens re-recorded without review. *Cause:* too many goldens across too many configurations. *Fix:* fewer, chosen deliberately.
+
+**A migration ships broken despite a green suite.** *Symptom:* crash on launch for upgraders (ch. 15). *Cause:* no migration test, or schemas not committed. *Fix:* `MigrationTestHelper` in CI with exported schemas.
+
+## Cheat-sheet: Testing
+
+```kotlin
+// coroutines: virtual time, injected dispatcher, Turbine
+@Test fun x() = runTest {
+    vm.state.test { assertThat(awaitItem()).isEqualTo(Loading); cancelAndIgnoreRemainingEvents() }
+}
+
+// lifecycle, deterministically
+ActivityScenario.launch(MainActivity::class.java).use { it.recreate() }
+
+// http, for real, with scripted failures
+mockWebServer.enqueue(MockResponse().setResponseCode(500))
+
+// a fake beats a mock, most of the time
+class FakeRepo : Repo { private val s = MutableStateFlow(emptyList<Item>()) /* ... */ }
+```
+
+```bash
+adb shell settings put global window_animation_scale 0    # and transition_, animator_
+./gradlew testDebugUnitTest                                # JVM + Robolectric
+./gradlew connectedDebugAndroidTest                        # device
+./gradlew verifyPaparazzi                                  # screenshots, no device
+```
+
+| Test this | At this level |
+|---|---|
+| business logic, mappers, reducers | JVM unit |
+| a `ViewModel` state stream | JVM unit + Turbine |
+| resources, `Bundle`s, lifecycle | Robolectric |
+| Room migrations | instrumented (`MigrationTestHelper`) |
+| a screen's behaviour | Compose test |
+| permission dialogs, other apps | UiAutomator |
+| visual regression | Paparazzi |
+
+<LabCard module=":ch22-testing">
+For one feature, write the full ladder: `ViewModel` unit tests, a Room migration test, a MockWebServer-backed repository test, Compose UI tests, and a Paparazzi golden set. The constraint is the lesson — **everything except the migration test must be green in under two minutes on the JVM**. If it is slower, something is at the wrong level of the pyramid; find it and move it down.
+</LabCard>

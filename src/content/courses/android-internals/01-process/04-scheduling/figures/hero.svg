@@ -1,0 +1,60 @@
+<svg viewBox="0 0 700 336" role="img" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="dg-arrow-c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--dg-line)"/>
+    </marker>
+  </defs>
+
+  <g data-part="queue">
+    <text x="20" y="30" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">ready threads, from every app</text>
+    <rect x="16" y="40" width="300" height="30" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="166" y="60" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">your main thread</text>
+    <rect x="16" y="76" width="300" height="30" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="166" y="96" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">your RenderThread</text>
+    <rect x="16" y="112" width="300" height="30" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="166" y="132" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-label)">another app's threads</text>
+    <rect x="16" y="148" width="300" height="30" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1"/>
+    <text x="166" y="168" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">and a few thousand more</text>
+  </g>
+
+  <g data-part="scheduler">
+    <rect x="344" y="76" width="116" height="66" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="402" y="104" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">scheduler</text>
+    <text x="402" y="124" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">picks who runs</text>
+    <path d="M320 108 H 338" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-c)"/>
+    <path d="M464 108 H 486" fill="none" stroke="var(--dg-line)" stroke-width="1.5" marker-end="url(#dg-arrow-c)"/>
+  </g>
+
+  <g data-part="cores">
+    <text x="494" y="30" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">cores</text>
+    <rect x="492" y="40" width="90" height="30" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="537" y="60" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">core 0</text>
+    <rect x="592" y="40" width="90" height="30" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="637" y="60" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">core 1</text>
+    <rect x="492" y="76" width="90" height="30" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="537" y="96" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">core 2</text>
+    <rect x="592" y="76" width="90" height="30" rx="4" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5"/>
+    <text x="637" y="96" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">core 3</text>
+    <text x="587" y="128" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">one thread each, right now</text>
+  </g>
+
+  <g data-part="switch">
+    <rect x="344" y="176" width="338" height="76" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="513" y="198" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">context switch: save, then load</text>
+    <text x="513" y="220" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-muted)">registers</text>
+    <text x="513" y="238" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-muted)">program counter, stack pointer</text>
+  </g>
+
+  <g data-part="pagetable">
+    <rect x="344" y="262" width="338" height="58" rx="8" fill="var(--dg-fill)" stroke="var(--dg-warn)" stroke-width="1.5"/>
+    <text x="513" y="284" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-warn)">another process? swap the page table too</text>
+    <text x="513" y="304" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">same process: the table stays, so it is cheaper</text>
+  </g>
+
+  <g data-part="coroutines">
+    <rect x="16" y="200" width="300" height="76" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)" stroke-width="1.5" stroke-dasharray="5 3"/>
+    <text x="166" y="224" text-anchor="middle" font-family="var(--font-ui)" font-size="12" fill="var(--dg-label)">ten thousand coroutines</text>
+    <text x="166" y="244" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">objects on your heap</text>
+    <text x="166" y="264" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">never in the list above</text>
+  </g>
+</svg>

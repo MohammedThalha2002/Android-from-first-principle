@@ -1,0 +1,16 @@
+---
+/**
+ * Where the lesson's stepped figure lands.
+ *
+ * Same arrangement as <Check>: the drawing and its steps are files next to
+ * the lesson, the layout inlines them, and this marks the place in the prose
+ * they belong. `src` names the pair (`hero.svg` and `hero.steps.json`).
+ */
+interface Props {
+  src?: string;
+  caption?: string;
+  label?: string;
+}
+const { src = 'hero' } = Astro.props;
+---
+<div class="figure-slot" data-figure={src}></div>

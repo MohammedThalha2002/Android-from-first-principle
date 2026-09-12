@@ -1,0 +1,344 @@
+/* ==========================================================================
+   Design tokens.
+
+   The single source of truth for colour, type, space, radius and elevation.
+   Nothing else in the codebase may hardcode a colour or a font stack.
+
+   THE MODEL: an app shell, not a document.
+   ┌─ chrome ──────────────────────────────────────────────────────────────┐
+   │ brand        [ Home ][ Posts ]                                theme   │
+   ├───────────────────────────────────────────────────────────────────────┤
+   │ ╭── canvas ───────────────────────────────────────────────────────────╮
+   │ │  cards on a dot-grid ground                                         │
+   │ ╰─────────────────────────────────────────────────────────────────────╯
+   └───────────────────────────────────────────────────────────────────────┘
+   The CHROME (the top bar) is dark in BOTH themes: it is the frame, and a
+   frame that flips with the theme stops reading as a frame.
+   The CANVAS is where the theme lives. Cards sit on the canvas.
+
+   THREE LAYERS OF COLOUR
+     --chrome-*   the frame. Fixed. Same values under every theme.
+     --canvas / --card / --ink-* / --line-*   the themed surfaces and text.
+     --accent     the ACTIVE GROUP. Swapped by data-group on <html>, so a
+                  post under the "ai" group (once registered) can read
+                  differently from one under "android". The platform itself
+                  (home) uses --primary, a neutral blue that belongs to no
+                  group.
+     --tint-*     pastel category surfaces for chips and card heads, each
+                  paired with a --tint-*-ink that clears AA on it.
+
+   THEME RESOLUTION — three states, not two.
+     :root                                   complete light palette
+     @media (prefers-color-scheme: dark)     only when the reader has NOT
+       :root:not([data-theme='light'])       explicitly chosen light
+     :root[data-theme='dark']                explicit dark wins either way
+   Declare every token in :root first; a token that exists only inside a
+   [data-theme] block never applies for readers on "system".
+
+   CONTRAST — every text/ground pairing below was checked at WCAG AA (4.5:1)
+   on canvas, card AND card-2 in both themes. tests/theme.test.js and
+   tests/diagram-contrast.test.js re-check on every build.
+   ========================================================================== */
+
+:root {
+  /* ---- type -------------------------------------------------------------
+     Manrope carries everything except code. The reference product is
+     all-sans and dense; one family keeps UI labels, headings and the
+     reading column in the same voice, and a variable font costs one
+     request. IBM Plex Mono stays for code: it keeps l/1/I and O/0 distinct
+     at 13px, which matters in a post full of package names.            */
+  --font-ui:    'Manrope Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-prose: var(--font-ui);
+  --font-mono:  'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Compact app scale. Body copy in the reading column is lifted to
+     --text-read; everything else sits a step smaller than a document would. */
+  --text-2xs:  0.6875rem;   /* 11px  eyebrows, badge digits          */
+  --text-xs:   0.75rem;     /* 12px  chips, meta                     */
+  --text-sm:   0.8125rem;   /* 13px  table cells, nav rows           */
+  --text-base: 0.875rem;    /* 14px  UI body                         */
+  --text-read: clamp(1rem, 0.97rem + 0.18vw, 1.0625rem); /* 16–17px prose */
+  --text-lg:   1rem;        /* 16px  card titles                     */
+  --text-xl:   1.25rem;     /* 20px  section titles                  */
+  --text-2xl:  clamp(1.5rem, 1.35rem + 0.7vw, 1.875rem);   /* page titles   */
+  --text-3xl:  clamp(1.875rem, 1.6rem + 1.4vw, 2.5rem);    /* chapter title */
+
+  --leading-tight: 1.15;
+  --leading-snug:  1.35;
+  --leading-body:  1.5;
+  --leading-read:  1.7;
+
+  --tracking-tight: -0.018em;
+  --tracking-caps:  0.08em;
+
+  --weight-regular: 450;
+  --weight-medium:  550;
+  --weight-semibold: 650;
+  --weight-bold:    750;
+
+  /* ---- space ----------------------------------------------------------- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+
+  /* ---- shape -----------------------------------------------------------
+     Rounder than a document. The canvas inset is the largest radius on the
+     page; cards step down from it; chips are pills.                     */
+  --radius-canvas: 18px;
+  --radius-lg:     14px;
+  --radius:        10px;
+  --radius-sm:     6px;
+  --radius-pill:   999px;
+
+  /* ---- layout ---------------------------------------------------------- */
+  --chrome-bar:  3.5rem;     /* top bar height                        */
+  --section-list: 18rem;     /* the chapter's own section list        */
+  --measure:     66ch;       /* reading column                        */
+  --measure-wide: 88ch;      /* code and diagrams may exceed it       */
+
+  /* ---- chrome: fixed in both themes ----------------------------------- */
+  /* The bar is part of the page, not a frame around it, so the chrome family
+     points at the themed surfaces instead of carrying a second palette. One
+     definition, and both themes follow for free. Custom properties resolve
+     where they are used, so referring forward to --card here is fine. */
+  --chrome:        var(--card);
+  --chrome-2:      var(--canvas);   /* recessed ground: the theme control    */
+  --chrome-line:   var(--line);
+  --chrome-ink:    var(--ink);
+  --chrome-ink-2:  var(--ink-3);
+  --chrome-active: var(--ink);      /* a pressed control, inverted           */
+  --chrome-active-ink: var(--card);
+
+  /* ---- canvas & cards: light ------------------------------------------- */
+  --canvas:  #F3F5F8;
+  --card:    #FFFFFF;
+  --card-2:  #F7F8FB;        /* nested / inset surface                */
+  --dot:     rgba(21, 22, 30, 0.09);  /* canvas dot grid              */
+
+  --ink:   #15161E;          /* 16.50 canvas · 18.02 card             */
+  --ink-2: #4B5061;          /*  7.34 canvas ·  8.02 card             */
+  --ink-3: #646A80;          /*  4.91 canvas ·  5.36 card · 5.05 card-2 */
+  --line:   #E3E6EC;
+  --line-2: #CDD2DC;
+
+  /* Platform primary. Belongs to no group; used on the home page and any
+     control that is not inside a post.                                 */
+  --primary:     #2456E0;    /* 5.52 canvas · 6.03 card               */
+  --primary-ink: #FFFFFF;
+  --primary-bg:  #DCE7FB;
+
+  /* ---- the active group -------------------------------------------------
+     Defaults to the platform primary. data-group on <html> swaps these
+     (see the group blocks at the end of the file). Components inside a
+     group use --accent; they never name a group colour directly.        */
+  --accent:     var(--primary);
+  --accent-ink: var(--primary-ink);
+  --accent-bg:  var(--primary-bg);
+
+  /* ---- tints: pastel category surfaces --------------------------------
+     For chips and tinted card heads. Each ink clears AA on its tint.
+     The tint is a SURFACE; body text on a tinted head uses --tint-*-ink,
+     never --ink.                                                         */
+  --tint-green:      #E4F4D3;  --tint-green-ink:  #2A6318;   /* 6.28 */
+  --tint-coral:      #FBD8DC;  --tint-coral-ink:  #9B2537;   /* 5.88 */
+  --tint-violet:     #E8E1FB;  --tint-violet-ink: #5227B3;   /* 7.22 */
+  --tint-blue:       #DCE7FB;  --tint-blue-ink:   #1A47B0;   /* 6.56 */
+  --tint-amber:      #FBEAC4;  --tint-amber-ink:  #7E4F05;   /* 5.87 */
+  --tint-teal:       #D6ECEA;  --tint-teal-ink:   #00554F;   /* 7.07 */
+  --tint-grey:       #E9EBF0;  --tint-grey-ink:   #4B5061;   /* 6.72 */
+
+  /* ---- status: the tracker's own semantics ----------------------------
+     Mapped onto tints so a chip and a card head agree. Kept separate from
+     --accent so "completed" never reads as merely "selected".           */
+  --status-todo:        var(--tint-grey);   --status-todo-ink:  var(--tint-grey-ink);
+  --status-doing:       var(--tint-amber);  --status-doing-ink: var(--tint-amber-ink);
+  --status-done:        var(--tint-green);  --status-done-ink:  var(--tint-green-ink);
+  --status-new:         var(--tint-coral);  --status-new-ink:   var(--tint-coral-ink);
+  --track:              #E3E6EC;
+  --track-fill:         var(--accent);
+  --track-complete:     #3C8F2A;
+
+  /* Semantic callouts inside prose. */
+  --ok:      #2A6318;  --ok-bg:   var(--tint-green);
+  --warn:    #7E4F05;  --warn-bg: var(--tint-amber);
+  --err:     #9B2537;  --err-bg:  var(--tint-coral);
+  --info:    #1A47B0;  --info-bg: var(--tint-blue);
+
+  /* ---- code: dark in both themes -----------------------------------------
+     Light-on-dark is what every engineer reads in their editor, and it
+     keeps a fixed anchor on the page when the theme flips.             */
+  --code-bg:      #15161E;
+  --code-surface: #1E1F2A;
+  --code-ink:     #E4E6EE;
+  --code-ink-2:   #9DA2B5;
+  --code-ink-3:   #7B8095;
+  --code-line:    #2A2B37;
+  --code-scroll:  #3A3C4A;
+
+  --syn-comment: #7B8095;
+  --syn-keyword: #8FB0FF;
+  --syn-string:  #B9D98A;
+  --syn-number:  #F2CC7B;
+  --syn-type:    #F4A28A;
+  --syn-func:    #CDBBFB;
+  --syn-punct:   #9DA2B5;
+
+  /* ---- diagram roles ------------------------------------------------------
+     Inline SVG uses ONLY these. tests/diagram-contrast.test.js pins each
+     against --card in both themes.                                      */
+  --dg-ground:  var(--card);
+  --dg-line:    #646A80;
+  --dg-label:   #15161E;
+  --dg-muted:   #646A80;
+  --dg-accent:  var(--accent);
+  --dg-warn:    #7E4F05;
+  --dg-ok:      #2A6318;
+  --dg-fill:    #E1E4EB;
+  --dg-fill-2:  #DCE7FB;
+
+  /* ---- elevation ------------------------------------------------------- */
+  --shadow-sm: 0 1px 2px rgba(21, 22, 30, 0.05);
+  --shadow:    0 1px 2px rgba(21, 22, 30, 0.04), 0 8px 24px -12px rgba(21, 22, 30, 0.18);
+  --shadow-lg: 0 2px 6px rgba(21, 22, 30, 0.06), 0 24px 48px -24px rgba(21, 22, 30, 0.3);
+
+  --ring: 0 0 0 2px var(--card), 0 0 0 4px var(--accent);
+
+  color-scheme: light;
+}
+
+/* ---- dark canvas ---------------------------------------------------------
+   The chrome does not change. The canvas goes to a slate a step lighter than
+   the chrome so the frame still reads as a frame; cards step up from it.
+   Tints become their solid dark equivalents rather than alpha, so text on
+   them is measurable. Duplicated across the two selectors on purpose: the
+   media query serves "system", the attribute selector serves a choice. */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --canvas:  #1A1B24;
+    --card:    #22232F;
+    --card-2:  #292B38;
+    --dot:     rgba(238, 240, 246, 0.06);
+
+    --ink:   #EEF0F6;
+    --ink-2: #B6BACA;
+    --ink-3: #9297AA;
+    --line:   #30323F;
+    --line-2: #3D4050;
+
+    --primary:     #7FA3FF;
+    --primary-ink: #0A1430;
+    --primary-bg:  #26314B;
+
+    --tint-green:  #243A2C;  --tint-green-ink:  #9BE3AF;
+    --tint-coral:  #3D262B;  --tint-coral-ink:  #F6A6AE;
+    --tint-violet: #31294A;  --tint-violet-ink: #CDBBFB;
+    --tint-blue:   #26314B;  --tint-blue-ink:   #A6C0FF;
+    --tint-amber:  #3C3224;  --tint-amber-ink:  #F2CC7B;
+    --tint-teal:   #203A3A;  --tint-teal-ink:   #7ED9CF;
+    --tint-grey:   #2E303D;  --tint-grey-ink:   #B6BACA;
+
+    --track:          #30323F;
+    --track-complete: #7ED3A0;
+
+    --ok:   #9BE3AF;  --warn: #F2CC7B;  --err: #F6A6AE;  --info: #A6C0FF;
+
+    --code-bg:      #12131A;
+    --code-surface: #1A1B24;
+    --code-line:    #2A2B37;
+
+    --dg-line:   #9297AA;
+    --dg-label:  #EEF0F6;
+    --dg-muted:  #9297AA;
+    --dg-warn:   #F2CC7B;
+    --dg-ok:     #9BE3AF;
+    --dg-fill:   #333646;
+    --dg-fill-2: #26314B;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow:    0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px -12px rgba(0, 0, 0, 0.6);
+    --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.4), 0 24px 48px -24px rgba(0, 0, 0, 0.8);
+
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --canvas:  #1A1B24;
+  --card:    #22232F;
+  --card-2:  #292B38;
+  --dot:     rgba(238, 240, 246, 0.06);
+
+  --ink:   #EEF0F6;
+  --ink-2: #B6BACA;
+  --ink-3: #9297AA;
+  --line:   #30323F;
+  --line-2: #3D4050;
+
+  --primary:     #7FA3FF;
+  --primary-ink: #0A1430;
+  --primary-bg:  #26314B;
+
+  --tint-green:  #243A2C;  --tint-green-ink:  #9BE3AF;
+  --tint-coral:  #3D262B;  --tint-coral-ink:  #F6A6AE;
+  --tint-violet: #31294A;  --tint-violet-ink: #CDBBFB;
+  --tint-blue:   #26314B;  --tint-blue-ink:   #A6C0FF;
+  --tint-amber:  #3C3224;  --tint-amber-ink:  #F2CC7B;
+  --tint-teal:   #203A3A;  --tint-teal-ink:   #7ED9CF;
+  --tint-grey:   #2E303D;  --tint-grey-ink:   #B6BACA;
+
+  --track:          #30323F;
+  --track-complete: #7ED3A0;
+
+  --ok:   #9BE3AF;  --warn: #F2CC7B;  --err: #F6A6AE;  --info: #A6C0FF;
+
+  --code-bg:      #12131A;
+  --code-surface: #1A1B24;
+  --code-line:    #2A2B37;
+
+  --dg-line:   #9297AA;
+  --dg-label:  #EEF0F6;
+  --dg-muted:  #9297AA;
+  --dg-warn:   #F2CC7B;
+  --dg-ok:     #9BE3AF;
+  --dg-fill:   #333646;
+  --dg-fill-2: #26314B;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow:    0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px -12px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.4), 0 24px 48px -24px rgba(0, 0, 0, 0.8);
+
+  color-scheme: dark;
+}
+
+/* ==========================================================================
+   GROUP ACCENTS
+   One block per group, light then dark. Base.astro stamps data-group on
+   <html> from the group registry (src/data/groups.ts); the registry is the
+   only other place a group colour is named, and only so a group card can
+   show it outside the group's own pages. A subtopic (e.g. "LLD for Android")
+   does NOT get its own accent — subtopics live inside a group and share its
+   colour; only groups do. Add a block here when a new group (e.g. "ai")
+   is registered with its own colour; an unregistered group just uses the
+   platform primary.
+
+   Android keeps the deep teal: the brand green #3DDC84 scores 1.56:1 on a
+   light ground and cannot carry text, and the teal reads as the same family
+   without impersonating the trademark.
+   ========================================================================== */
+
+:root[data-group='android'] {
+  --accent:     #006B66;   /* 5.84 canvas · 6.37 card */
+  --accent-ink: #FFFFFF;
+  --accent-bg:  var(--tint-teal);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light'])[data-group='android'] { --accent: #3FBFB2; --accent-ink: #06201E; }
+}
+:root[data-theme='dark'][data-group='android'] { --accent: #3FBFB2; --accent-ink: #06201E; }

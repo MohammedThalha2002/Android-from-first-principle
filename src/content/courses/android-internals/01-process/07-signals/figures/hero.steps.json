@@ -1,0 +1,12 @@
+{
+  "title": "Two signals, two very different answers",
+  "desc": "A drawing of a running process receiving two kinds of signal from the kernel: one the runtime catches and answers with a thread dump, and one that ends the process where it stands.",
+  "steps": [
+    { "show": ["process", "code"], "note": "Your process is running your code, on its threads, in its own memory." },
+    { "show": ["kernel", "process"], "note": "The kernel can deliver a signal to it: a number with a name, carrying nothing else." },
+    { "show": ["kernel", "process", "sigquit", "dump"], "note": "SIGQUIT can be caught. The runtime catches it and writes out what every thread is doing." },
+    { "show": ["process", "dump", "continues"], "note": "Then the process carries on. That dump is what an ANR report is made of." },
+    { "show": ["kernel", "process", "sigkill"], "note": "SIGKILL cannot be caught by anything. No handler can be registered for it." },
+    { "show": ["sigkill", "gone"], "note": "The process stops between two instructions. No finally block, no shutdown hook, no onDestroy." }
+  ]
+}

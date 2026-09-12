@@ -1,0 +1,222 @@
+---
+title: "Tooling, adb & Reading Paths"
+navTitle: "C · Tooling & adb"
+summary: "The environment, the adb commands that recur in every chapter, the inspectors and profilers, and five routes through the blog."
+readingTime: "1 hour"
+minutes: 50
+tags: ["android studio","avd","emulator","wireless debugging","adb","dumpsys","logcat","bugreport","layout inspector","database inspector","background task inspector","perfetto","macrobenchmark","apkanalyzer","leakcanary","strictmode","reading paths"]
+draft: true
+date: "2026-09-05"
+subtopic: "android-internals"
+subtopicOrder: 23
+part: "appendix"
+kind: "appendix"
+verifiedAgainst: "Android Studio 2026.1 · platform-tools 36"
+stage: "outline"
+sources: ["28-appendix-c-tooling-adb-and-reading-paths#Environment","28-appendix-c-tooling-adb-and-reading-paths#adb, the cheat-sheet that recurs in every chapter","28-appendix-c-tooling-adb-and-reading-paths#The inspectors","28-appendix-c-tooling-adb-and-reading-paths#Profilers &amp; traces","28-appendix-c-tooling-adb-and-reading-paths#Reading paths"]
+---
+The reference appendix: the environment, the commands that recur throughout the series in one place, and five routes through the chapters depending on why you are here.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Environment
+
+**Android Studio channels.** Stable for real work. Canary is worth a second installation for previewing tooling, never for the build you ship from.
+
+**SDK and AVD manager.** Keep `compileSdk` on the latest stable platform (ch. 20) and command-line tools installed — most of this appendix is command line.
+
+**Emulator versus device.** The emulator is fast, scriptable, and perfect for the API-level matrix and for forcing states (`deviceidle`, `wm size`). But **a cheap physical device is mandatory**, and the reason is chapter 11: an emulator on a developer laptop has desktop-class CPU and memory, so it hides exactly the performance problems your users will hit. One mid-range phone, two or three years old, is the single most valuable piece of test hardware you can own.
+
+**Gradle and JDK versions** are pinned by the wrapper and the toolchain — never by whatever is on your `PATH`, or builds differ between machines and CI (ch. 20).
+
+**Wireless debugging** pairs over Wi-Fi, which matters for anything involving physical movement — location, sensors, geofences (appendix B):
+
+```bash
+adb pair <host>:<port>          # the code shown in developer options
+adb connect <host>:<port>
+```
+
+## adb, the cheat-sheet that recurs in every chapter
+
+<Diagram
+  caption="Three processes, not one. Almost every adb problem that is not a broken cable is the middle box — which is why kill-server fixes so much, and why an authorisation prompt appears on the phone rather than in your terminal."
+  label="Topology of adb: the adb command you type is a client that talks to a single adb server process on your machine listening on port 5037, which in turn talks to the adbd daemon running on each connected device over USB or TCP. Device not found usually means the server, and unauthorized means the device has not accepted your key."
+>
+  <svg viewBox="0 0 660 250" width="660" height="250">
+    <rect x="12" y="34" width="164" height="72" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="94" y="58" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">adb CLIENT</text>
+    <text x="94" y="76" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">what you type. Short-lived,</text>
+    <text x="94" y="90" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">one per command</text>
+
+    <rect x="248" y="34" width="164" height="72" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="330" y="58" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-accent)">adb SERVER</text>
+    <text x="330" y="76" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">ONE per machine, port 5037.</text>
+    <text x="330" y="90" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">Owns the device list</text>
+
+    <rect x="484" y="34" width="164" height="72" rx="8" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="566" y="58" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">adbd ON THE DEVICE</text>
+    <text x="566" y="76" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">runs your shell command</text>
+    <text x="566" y="90" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">as the shell user</text>
+
+    <path d="M176 70 L248 70M412 70 L484 70" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path d="M240 64 L248 70 L240 76M476 64 L484 70 L476 76" fill="none" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <text x="212" y="124" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">local socket</text>
+    <text x="448" y="124" text-anchor="middle" font-family="var(--font-ui)" font-size="9.5" fill="var(--dg-muted)">USB or TCP</text>
+
+    <rect x="176" y="150" width="308" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="330" y="169" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">device not found: restart the middle box</text>
+    <rect x="176" y="188" width="308" height="30" rx="6" fill="var(--dg-fill)" stroke="var(--dg-warn)"/>
+    <text x="330" y="207" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">unauthorized: accept the key ON THE PHONE</text>
+    <path d="M330 106 L330 150" fill="none" stroke="var(--dg-warn)" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+    <text x="330" y="240" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">The server starts itself on first use, so it can be stale from a previous session.</text>
+  </svg>
+</Diagram>
+
+### Lifecycle and process (ch. 2, 5 and 9)
+
+```bash
+adb shell am start -W -n <pkg>/.MainActivity   # TotalTime, WaitTime, LaunchState
+adb shell am force-stop <pkg>                  # kill AND discard saved state
+adb shell am kill <pkg>                        # kill, KEEP saved state — real process death
+adb shell ps -A | grep <pkg>                   # running? which UID?
+adb shell am set-standby-bucket <pkg> restricted
+adb shell am get-standby-bucket <pkg>
+adb shell am compat enable <CHANGE_ID> <pkg>   # one behaviour change at a time (ch. 20)
+```
+
+`am kill` versus `force-stop` is the distinction that matters: only `am kill` reproduces the process death users experience (ch. 5).
+
+### dumpsys — the system's own state
+
+```bash
+adb shell dumpsys activity activities          # tasks and the back stack (ch. 5 and 7)
+adb shell dumpsys activity processes           # priority buckets (ch. 9)
+adb shell dumpsys package <pkg>                # permissions, signatures, components (ch. 6)
+adb shell dumpsys gfxinfo <pkg> framestats     # per-frame timings (ch. 8 and 11)
+adb shell dumpsys jobscheduler | grep -A25 <pkg>   # is my work scheduled (ch. 9)
+adb shell dumpsys notification --noredact      # channels and posted notifications (ch. 9)
+adb shell dumpsys meminfo <pkg>                # memory, including graphics (ch. 11)
+adb shell dumpsys batterystats --charged <pkg> # battery attribution (ch. 11)
+adb shell dumpsys deviceidle force-idle        # force Doze; 'unforce' after (ch. 9)
+```
+
+### Permissions and packages (ch. 6 and 10)
+
+```bash
+adb shell pm grant <pkg> android.permission.CAMERA
+adb shell pm revoke <pkg> android.permission.CAMERA
+adb shell pm path <pkg>                        # every installed split (ch. 2)
+adb shell pm clear <pkg>                       # wipe data: test first run and restore (ch. 15)
+adb shell pm get-app-links <pkg>               # App Link verification state (ch. 6)
+```
+
+### Logs and reports
+
+```bash
+adb logcat -s MyTag:D                          # one tag
+adb logcat --pid=$(adb shell pidof -s <pkg>)   # just your process
+adb logcat -b crash                            # the crash buffer
+adb pull /data/anr/traces.txt                  # ANR: read the MAIN thread first (ch. 12)
+adb bugreport out.zip                          # everything; feed to Battery Historian
+```
+
+### Forcing configurations (ch. 5 and 19)
+
+```bash
+adb shell settings put system font_scale 2.0           # 1.0 to reset
+adb shell cmd uimode night yes                          # dark theme
+adb shell wm size 840x2400 && adb shell wm density 420  # 'wm size reset'
+adb shell settings put global window_animation_scale 0  # and transition_, animator_ (ch. 18)
+adb shell svc data disable ; adb shell svc wifi disable # offline (ch. 17)
+```
+
+### Input and capture
+
+```bash
+adb shell input tap 500 1200
+adb shell input text "hello"
+adb shell input keyevent KEYCODE_BACK
+adb shell screenrecord /sdcard/demo.mp4         # Ctrl-C to stop, then adb pull
+adb exec-out screencap -p > shot.png
+adb shell content query --uri content://<authority>/<path>     # ch. 6
+```
+
+## The inspectors
+
+In Android Studio, and each answers a question the command line does not.
+
+**Layout Inspector** — the live view or composition tree, with **recomposition counts** (ch. 13), which is the fastest way to find a composable recomposing on every frame.
+
+**Database Inspector** — query your Room database on a running device (ch. 15). Live, editable, and it removes most of the reason to log rows.
+
+**Network Inspector** — requests, timings and payloads without adding a logging interceptor to a release build (ch. 16).
+
+**Background Task Inspector** — WorkManager state: enqueued, running, blocked and by which constraint (ch. 9). Usually the fastest answer to "why has my work not run".
+
+**App Quality Insights** — Crashlytics and Play Vitals issues inside the IDE, linked to the line of source (ch. 20).
+
+**Profileable release builds** let you profile a release build without making it debuggable — which matters, because a debuggable build is not representative (ch. 11).
+
+## Profilers &amp; traces
+
+**Perfetto UI** — the system-wide timeline. Main thread and RenderThread side by side, your own `trace("…")` sections, and every process on the device. The tool for "which stage of the frame was slow" (ch. 8 and 11).
+
+**Macrobenchmark** — startup and frame timings for a scripted interaction, stable enough to gate CI (ch. 11). **Microbenchmark** for a tight loop, though it is rarely where the problem is.
+
+**apkanalyzer** — what is actually in your artifact (ch. 2):
+
+```bash
+apkanalyzer apk summary app-release.apk
+apkanalyzer manifest print app-release.apk      # the MERGED manifest (ch. 6)
+apkanalyzer dex references app-release.apk      # method reference counts
+apkanalyzer apk compare old.apk new.apk         # exactly what grew (ch. 11)
+```
+
+**R8 mapping files** — retrace an obfuscated stack trace (ch. 11 and 20). Keep the mapping for every shipped build; without it a crash report is unreadable.
+
+**LeakCanary** — automatic leak detection in debug, catching the Activity, Fragment, listener and `Context` leaks of chapters 5, 8 and 14.
+
+**StrictMode** — main-thread disk and network access, and leaked closeables, reported at the moment they happen (ch. 11).
+
+**ndk-stack** — symbolise a native tombstone (appendix B).
+
+## Reading paths
+
+Five routes. Each is also listed on the Android topic page, alongside every post.
+
+### New to Android — 12 to 16 weeks
+
+**1 → 2 → 4 → 5 → 8 → 11 → 13 → 14 → 10 → 22**, then Parts IV and V.
+
+The platform first so nothing later is magic, then the language, then the two hardest fundamentals — lifecycle and threading. Compose before architecture, because architecture is easier to motivate once you have seen state drive a UI. Testing at the end of the first pass, because you now have something worth testing.
+
+### Experienced but self-taught — 6 weeks
+
+**1 → 5 → 8 → 11 → 15 → 17 → 21 → 24**
+
+For someone shipping Android already whose knowledge has gaps where the mechanism should be. These eight are where self-taught knowledge is most often approximate: the process model, structured concurrency, the Compose runtime, offline correctness, background restrictions, and the two production chapters.
+
+### Interview preparation
+
+**1, 4, 5, 8, 11, 17, 21** — and **every "failure modes" section** in the book.
+
+The seven that get asked about. The failure modes matter more than the prose: interviews reward "I have seen this break and here is why", which is exactly what those sections are.
+
+### Maintaining a legacy app
+
+**3 → 4 → 7 → 25 → 23 → 21**
+
+Components and the manifest, because an old app is full of them. Lifecycle, because that is where its bugs are. Views, because that is what it is written in. Then compatibility and the build, which is what makes an old app shippable, and performance last.
+
+### Backend engineer crossing over
+
+**1 → 3 → 5 → 13 → 15 → 17**
+
+The differences from a server are the whole point: you do not own your process, there is no `main()`, one thread is special, the network is hostile, the client is a replica that must work offline, and the OS decides when you may run.
+
+---
+
+*"The framework is a set of answers. Learn the questions and the answers become obvious."*

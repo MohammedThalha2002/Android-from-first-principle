@@ -1,0 +1,78 @@
+{
+  "lesson": "1.1",
+  "title": "Your app is a process",
+  "questions": [
+    {
+      "stage": "pre",
+      "question": "A user leaves your app, comes back twenty minutes later, and the screen is exactly as they left it. What does that tell you about the app's process?",
+      "options": [
+        "It was running the whole time",
+        "It was paused, then resumed",
+        "Nothing. The process may have been ended and replaced",
+        "It was running, with less CPU than usual"
+      ],
+      "correct": 2,
+      "explanation": "Android promises to bring the screen back and nothing else. The process behind it can be ended and replaced while the user is away, and the screen is rebuilt from a description the system saved outside your process. Keep your answer in mind while you read the next section."
+    },
+    {
+      "stage": "check",
+      "question": "The system ends your app's process while the user is away. Which of these is gone when they come back?",
+      "options": [
+        "A file your app wrote to its own storage",
+        "The value in a companion object",
+        "A row your app saved in its database",
+        "The description of the screen the user was on"
+      ],
+      "correct": 1,
+      "explanation": "A companion object lives in the process's memory, and memory dies with the process. The other three were written outside the process, which is exactly why they come back. That split is the whole lesson."
+    },
+    {
+      "stage": "check",
+      "question": "You need a value to still be there after the process is replaced. Which change does that?",
+      "options": [
+        "Move it from a local variable into a companion object",
+        "Move it from a ViewModel into a singleton",
+        "Write it to DataStore when it changes",
+        "Mark it lateinit so it is set again on first use"
+      ],
+      "correct": 2,
+      "explanation": "Only a value written outside the process survives, and DataStore writes to storage. Moving a value between a ViewModel, a singleton and a companion object moves it around inside the same memory, which all dies together. lateinit changes the error you get, not where the value lives."
+    },
+    {
+      "stage": "check",
+      "question": "The \"Don't keep activities\" developer option is on, and your companion object still has its value after you leave the screen and come back. What did you actually test?",
+      "options": [
+        "That the process survives being sent to the background",
+        "Activity recreation, with the process still alive",
+        "That saved instance state is written correctly",
+        "That the value is stored outside the process"
+      ],
+      "correct": 1,
+      "explanation": "That option destroys the Activity as soon as it stops, but it leaves the process running, so everything in memory survives. It is a real test of Activity recreation and it hides the failure this lesson describes. To test this one, the process itself has to end."
+    },
+    {
+      "stage": "post",
+      "question": "A teammate says a bug cannot be process death, because the app was still showing in Recents. What is wrong with that argument?",
+      "options": [
+        "Nothing. A card in Recents means the process is alive",
+        "Recents is a list the system keeps, and it outlives the process",
+        "Recents only shows apps that have a foreground service",
+        "Process death always removes the card from Recents"
+      ],
+      "correct": 1,
+      "explanation": "Recents lists tasks the user was doing, not processes the kernel is running. A card can sit there with no process behind it, and tapping it creates a new one. To know whether a process exists, ask for the process list rather than looking at the user interface."
+    },
+    {
+      "stage": "post",
+      "question": "Why is onDestroy a poor place to save data?",
+      "options": [
+        "It runs on a background thread, so writes can be lost",
+        "It runs too early, before the user has finished",
+        "When the system ends the process, there is no process left to call it",
+        "It only runs on Android 11 and later"
+      ],
+      "correct": 2,
+      "explanation": "onDestroy is a call the framework makes while your process is alive. When the system reclaims the process there is nothing left to make that call, so it never happens. Save when a value changes instead of on the way out."
+    }
+  ]
+}

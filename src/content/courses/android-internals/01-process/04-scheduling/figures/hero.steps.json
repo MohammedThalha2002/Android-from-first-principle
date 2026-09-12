@@ -1,0 +1,12 @@
+{
+  "title": "Cores, the scheduler and a context switch",
+  "desc": "A drawing of a queue of ready threads from several processes, a small number of cores that can each run one of them, and what the kernel saves and restores when it changes who is running.",
+  "steps": [
+    { "show": ["cores"], "note": "The phone has a fixed number of cores. Each one runs exactly one thread at a time." },
+    { "show": ["queue"], "note": "Every thread that is ready to run waits in one list, from every app on the device." },
+    { "show": ["cores", "queue", "scheduler"], "note": "The scheduler picks which of them get the cores right now. It schedules threads, not processes." },
+    { "show": ["cores", "switch"], "note": "When a turn ends, the kernel saves that thread's registers, program counter and stack pointer." },
+    { "show": ["switch", "pagetable"], "note": "If the next thread belongs to another process, the page table is swapped too, and that costs more." },
+    { "show": ["queue", "coroutines"], "note": "Coroutines are objects on your heap. They never enter this list, and a suspended one holds no thread." }
+  ]
+}

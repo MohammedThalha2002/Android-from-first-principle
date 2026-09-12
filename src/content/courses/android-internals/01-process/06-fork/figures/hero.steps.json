@@ -1,0 +1,54 @@
+{
+  "title": "One parent, many copies",
+  "desc": "A drawing of the process that loaded the framework at boot, two app processes forked from it, the memory pages all three share, and the single page that becomes private when one of them writes.",
+  "steps": [
+    {
+      "show": [
+        "parent",
+        "framework"
+      ],
+      "note": "At boot, one process loads the runtime and the framework classes every app needs. Then it waits."
+    },
+    {
+      "show": [
+        "parent",
+        "framework",
+        "fork-1",
+        "child-1"
+      ],
+      "note": "You tap an icon. That process forks, and the copy already has everything loaded."
+    },
+    {
+      "show": [
+        "child-1",
+        "shared"
+      ],
+      "note": "Nothing was duplicated. The kernel copied the page table, and both tables point at the same physical pages."
+    },
+    {
+      "show": [
+        "parent",
+        "child-1",
+        "child-2",
+        "fork-2"
+      ],
+      "note": "Every other app on the phone is another copy of the same parent."
+    },
+    {
+      "show": [
+        "child-1",
+        "write",
+        "private"
+      ],
+      "note": "A write hits a read-only entry and traps. The kernel copies that one page for the writer."
+    },
+    {
+      "show": [
+        "shared",
+        "child-1",
+        "child-2"
+      ],
+      "note": "Everything nobody writes stays shared, so ten running apps do not need ten copies of the framework."
+    }
+  ]
+}

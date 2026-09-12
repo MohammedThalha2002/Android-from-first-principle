@@ -1,0 +1,290 @@
+---
+title: "Integrations: Media, Native & Sensors"
+navTitle: "B · Integrations"
+summary: "Camera and media, WebView and Custom Tabs, the NDK and JNI, sensors, location and BLE. Each boundary has its own lifecycle and threading model."
+readingTime: "2 hours"
+minutes: 110
+tags: ["webview","custom tabs","addwebmessagelistener","webviewassetloader","ndk","jni","global ref","jnienv","cmake","abi split","tombstone","ndk-stack","fused location","geofencing","sensor batching","ble","gatt","glance","quick settings tile","wear os"]
+draft: true
+date: "2026-08-29"
+subtopic: "android-internals"
+subtopicOrder: 22
+part: "appendix"
+kind: "appendix"
+verifiedAgainst: "compileSdk 36 · NDK r28 · Glance 1.2"
+stage: "outline"
+sources: ["16-paging-lists-images-and-media#Camera","16-paging-lists-images-and-media#Video &amp; audio with Media3","16-paging-lists-images-and-media#Downloads &amp; large transfers","20-platform-integrations-and-native-interop#WebView","20-platform-integrations-and-native-interop#Custom Tabs &amp; external apps","20-platform-integrations-and-native-interop#The NDK &amp; JNI","20-platform-integrations-and-native-interop#Sensors &amp; location","20-platform-integrations-and-native-interop#Connectivity peripherals","20-platform-integrations-and-native-interop#ML on device","20-platform-integrations-and-native-interop#Failure modes","20-platform-integrations-and-native-interop#Cheat-sheet"]
+---
+Four chapters of Part IV so far have been about the platform constraining you. This one is about deliberately stepping outside the normal envelope — rendering someone else's web content, calling C++, reading a sensor, putting UI on a watch or a home screen.
+
+The shared lesson across all of them: **each boundary you cross has a different lifecycle, a different threading model, and a different failure mode**. The mistakes come from assuming your app's rules apply on the other side.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Camera
+
+CameraX replaces the raw Camera2 API with **use cases** bound to a lifecycle.
+
+```kotlin
+val preview = Preview.Builder().build()
+val capture = ImageCapture.Builder().build()
+val analysis = ImageAnalysis.Builder()
+    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+    .build()
+
+cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, capture, analysis)
+```
+
+`bindToLifecycle` means the camera is released automatically when the owner stops — the exclusive-resource case from chapter 5, handled for you.
+
+**Backpressure in `ImageAnalysis` is the decision that matters.** `KEEP_ONLY_LATEST` drops frames when your analyser is slow, which is right for a scanner where only the newest frame matters. `BLOCK_PRODUCER` keeps every frame and stalls the pipeline if you fall behind. And **you must close every `ImageProxy`** — failing to do so starves the buffer queue and the preview freezes.
+
+**Orientation and EXIF** is the perennial bug: a captured image carries an EXIF rotation tag rather than being rotated. Display it without honouring EXIF and it is sideways. `ImageCapture` handles this when you set a target rotation; a manual pipeline must read the tag.
+
+Camera needs a runtime permission requested in context (ch. 10).
+
+## Video &amp; audio with Media3
+
+`ExoPlayer` handles what `MediaPlayer` cannot: adaptive streaming, DRM and a large format matrix.
+
+```kotlin
+val player = ExoPlayer.Builder(context).build().apply {
+    setMediaItem(MediaItem.fromUri(url))
+    prepare()
+}
+```
+
+**Adaptive streaming** (HLS, DASH) publishes the same content at several bitrates; the player measures throughput and switches. That is why a stream degrades in quality rather than stalling when the network worsens — the behaviour users prefer, and it does not exist with a plain progressive MP4.
+
+**Buffering** is a trade-off you can tune: a large buffer resists network dips and wastes data if the user abandons the video; a small buffer starts fast and stalls sooner.
+
+**Background playback** requires two things together: a `MediaSession`, which exposes transport controls to the system, notification and other surfaces; and a **foreground service** with the `mediaPlayback` type (ch. 9), because audio continuing with no visible UI is exactly what a foreground service is for. Without the service, playback stops when the app is backgrounded.
+
+**DRM,** briefly: protected content uses Widevine at one of three security levels, and the level available depends on the device. Content that requires L1 will not play on a device that only offers L3, which is a device-matrix problem rather than a code problem.
+
+## Downloads &amp; large transfers
+
+**Resumable downloads** use HTTP range requests, so a failed transfer continues rather than restarting:
+
+```
+GET /video.mp4
+Range: bytes=1048576-
+→ 206 Partial Content
+```
+
+Persist the byte offset with the download record, so a resume survives process death (ch. 5).
+
+Three mechanisms, with different owners:
+
+| Tool | Runs | For |
+|---|---|---|
+| `DownloadManager` | system service, survives your process entirely | a large user-visible file |
+| WorkManager | your code, with constraints and backoff (ch. 9) | anything needing app logic |
+| Media3 `DownloadService` | Media3's own | offline video, with the player integrated |
+
+Progress notifications need `POST_NOTIFICATIONS` on Android 13+ (ch. 9), and a long transfer should be constrained to unmetered networks unless the user asked otherwise (ch. 16).
+
+## WebView
+
+The first decision is whether you want a WebView at all.
+
+**Custom Tabs** is the right answer for showing *someone else's* web content — documentation, terms, an OAuth flow. It is the user's browser: their cookies, their password manager, their extensions, and a visible URL bar so they can see where they are. It updates independently of your app and costs you no maintenance.
+
+**WebView** is right when the content is *yours* and must be embedded — a rich text editor, a chart library with no native equivalent, a hybrid screen.
+
+**Never use a WebView for OAuth.** Your app can read every keystroke in it, which is exactly what the flow is designed to prevent, and identity providers increasingly reject it (ch. 16).
+
+Two clients, two jobs: `WebViewClient` handles navigation and errors; `WebChromeClient` handles JavaScript dialogs, progress and file choosers.
+
+**JS bridges, safely.** `addJavascriptInterface` exposes a Kotlin object to page JavaScript — with untrusted content that is remote code execution in your process (ch. 10). Use the modern API:
+
+```kotlin
+WebViewCompat.addWebMessageListener(webView, "appBridge", setOf("https://example.com")) { _, message, _, _, _ ->
+    handle(message.data)      // scoped to an allowlisted origin
+}
+```
+
+The origin allowlist is the security property `addJavascriptInterface` never had.
+
+**`WebViewAssetLoader`** serves local assets over an `https://` origin, so your local content gets a normal web security context rather than the awkward `file://` rules. Keep `allowFileAccess` and `allowUniversalAccessFromFileURLs` off.
+
+**WebView updates through Play**, independently of the OS — so its version is not your `targetSdk`, and a WebView update can change behaviour without a release from you. Debug with `chrome://inspect`.
+
+## Custom Tabs &amp; external apps
+
+```kotlin
+CustomTabsIntent.Builder()
+    .setShowTitle(true)
+    .build()
+    .launchUrl(context, url)
+```
+
+**Warm-up and prefetch** through `CustomTabsClient` cut perceived latency noticeably: bind to the service early, call `mayLaunchUrl` when a tap is likely, and the page is already loading when the user commits.
+
+For **OAuth**, Custom Tabs plus PKCE plus an App Link back into your app (ch. 6) is the correct shape: the browser owns the credentials, and the verified link is what stops another app intercepting the callback.
+
+Sharing to other apps goes through `ACTION_SEND` with `createChooser` (ch. 6), and `FileProvider` for any file (ch. 15).
+
+## The NDK &amp; JNI
+
+Native code is justified in a short list of cases: **existing C/C++ you must reuse**, codecs, cryptographic primitives, heavy DSP or ML kernels. It is not justified for speed in general — ART with profile-guided compilation (ch. 2) is fast, and the JNI boundary has real cost.
+
+**The boundary has rules, and breaking them corrupts memory rather than throwing:**
+
+<Diagram
+  caption="The JNI boundary. A local reference dies with the call, the JNIEnv belongs to one thread, and a pending exception is not thrown for you — break any of the three and you corrupt memory rather than get an error."
+  label="Diagram of the JNI boundary: on the JVM side objects are garbage collected and references handed to native code are local and valid only for that call; a global reference must be created to keep one; the JNIEnv pointer is per thread; and after any call that can throw, the exception must be checked explicitly."
+>
+  <svg viewBox="0 0 660 262" width="660" height="262">
+    <rect x="12" y="26" width="248" height="176" rx="10" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="136" y="48" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-accent)">JVM SIDE</text>
+    <text x="136" y="68" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">objects move; the GC decides</text>
+    <rect x="30" y="82" width="212" height="26" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="136" y="99" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">a Kotlin object</text>
+    <rect x="30" y="118" width="212" height="26" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="136" y="135" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">a byte array</text>
+    <text x="136" y="168" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">an exception here is pending,</text>
+    <text x="136" y="182" text-anchor="middle" font-family="var(--font-ui)" font-size="10" fill="var(--dg-muted)">not thrown into C or C plus plus</text>
+
+    <path d="M300 26 L300 210" fill="none" stroke="var(--dg-warn)" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <rect x="262" y="100" width="76" height="24" rx="12" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="300" y="116" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">JNI</text>
+
+    <rect x="340" y="26" width="308" height="176" rx="10" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="494" y="48" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-label)">NATIVE SIDE</text>
+    <rect x="356" y="60" width="276" height="30" rx="5" fill="var(--dg-fill-2)" stroke="var(--dg-warn)"/>
+    <text x="368" y="79" font-family="var(--font-mono)" font-size="10" fill="var(--dg-warn)">local ref — valid for THIS CALL only</text>
+    <rect x="356" y="96" width="276" height="30" rx="5" fill="var(--dg-fill-2)" stroke="var(--dg-ok)"/>
+    <text x="368" y="115" font-family="var(--font-mono)" font-size="10" fill="var(--dg-ok)">global ref — survives; release it yourself</text>
+    <rect x="356" y="132" width="276" height="30" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="368" y="151" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">JNIEnv — one per thread, never shared</text>
+    <rect x="356" y="168" width="276" height="26" rx="5" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="368" y="185" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">ExceptionCheck after every throwing call</text>
+
+    <text x="330" y="228" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">Break any of these and the failure is memory corruption far from the cause —</text>
+    <text x="330" y="246" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">a tombstone with a nonsensical stack, not an exception you can read.</text>
+  </svg>
+</Diagram>
+
+**Local versus global references.** A `jobject` handed to native code is a *local* reference, valid only for that call. Store one in a C++ field and use it later and you have a dangling reference. Promote with `NewGlobalRef`, and release it — global references leak and there is a hard limit.
+
+**`JNIEnv` is per thread.** The pointer from one thread is invalid on another. A native thread calling into Java must `AttachCurrentThread` first and detach before exiting, or the thread leaks.
+
+**Copying versus pinning arrays.** `GetByteArrayElements` may copy or pin; `GetPrimitiveArrayCritical` pins and **blocks garbage collection** for its duration, so holding it across anything slow stalls your whole app.
+
+**Every exception must be checked.** JNI does not throw into C++. After a call that can throw, `ExceptionCheck` — otherwise you continue with a pending exception and behaviour is undefined.
+
+**ABI splits and size.** Each ABI is a separate copy of your native code. An app bundle (ch. 2) generates per-ABI splits, so users download one — which is exactly why a universal APK is the wrong artifact to ship.
+
+**Native crashes are not Java crashes.** A segfault kills the process with no stack trace in logcat; the detail is in a **tombstone** under `/data/tombstones/`. Symbolise it:
+
+```bash
+adb shell ls /data/tombstones/
+ndk-stack -sym app/build/intermediates/merged_native_libs/release/out/lib/arm64-v8a -dump tombstone_00
+```
+
+Upload the debug symbols to your crash reporter (ch. 20), or every native crash is an unreadable address.
+
+## Sensors &amp; location
+
+**Sensors** deliver at a rate you request — a hint, not a guarantee. The cost is proportional: a high rate keeps the CPU awake continuously.
+
+**Batching** is the fix. The sensor hub collects readings in hardware and delivers them in bursts, so the application processor stays asleep between deliveries. For step counting or activity logging this is the difference between negligible and significant battery use.
+
+**Wake-up versus non-wake-up sensors:** a wake-up sensor rouses the device to deliver; a non-wake-up one buffers and delivers when it is already awake. Choose non-wake-up unless the event must interrupt.
+
+**Location** goes through the Fused Location Provider, which combines GPS, Wi-Fi, cell and sensors. The priority you choose maps directly to battery:
+
+| Priority | Uses | Cost |
+|---|---|---|
+| `HIGH_ACCURACY` | GPS | highest — navigation only |
+| `BALANCED_POWER_ACCURACY` | Wi-Fi and cell, ~100 m | modest; right for most features |
+| `LOW_POWER` | cell, ~10 km | negligible |
+| `PASSIVE` | whatever other apps request | free |
+
+Two habits that matter more than the priority: **request the longest interval you can tolerate**, and set `setMaxUpdateDelayMillis` to let the system batch deliveries.
+
+**Geofencing** is far cheaper than polling location and comparing — the system uses hardware support and batches transitions. **Activity recognition** tells you walking, driving or still, which often removes the need for location entirely.
+
+**Background location** is a separate permission with a separate Play review (ch. 10). If while-in-use suffices, do not ask.
+
+## Connectivity peripherals
+
+Enough to know what you are getting into.
+
+**BLE** is the one most likely to consume a quarter and disappoint. The model is GATT: a peripheral exposes services containing characteristics; you connect, discover, then read, write or subscribe to notifications. What makes it hard is that **connections are unreliable by nature** — devices move, batteries die, radios interfere — so retry, reconnect and state recovery are the bulk of the work, not the happy path. Scanning is expensive; filter in the scan settings rather than in your callback, and never scan continuously in the background. BLE permissions changed substantially at Android 12 <ApiLevel changedIn="31" />, splitting into `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT` and `BLUETOOTH_ADVERTISE`, with a `neverForLocation` flag to avoid the location permission.
+
+**NFC** delivers a tag through an intent filter (ch. 6) or foreground dispatch while your Activity is resumed. Short interactions only — the tag is gone in a second.
+
+**USB** needs per-device permission and an intent filter for attachment.
+
+**Wi-Fi Direct / Aware** for peer-to-peer without an access point; niche and fiddly.
+
+**Companion Device Manager** is the modern, better-scoped path for pairing with a specific accessory: the user picks the device from a system dialog, and you get an association rather than broad scanning permissions.
+
+## ML on device
+
+**ML Kit** for solved problems — barcode scanning, text recognition, face detection, translation. Do not train a model for something that ships as an API.
+
+**LiteRT** (formerly TensorFlow Lite) for your own models, with **delegates** that offload to GPU or NPU. Benchmark the delegate rather than assuming: GPU is not always faster for small models, and hardware acceleration varies enormously across devices.
+
+**Model size is the real constraint.** A large model in the APK hurts install conversion (ch. 11); downloading on first use needs a fallback for users who never get it, plus storage and versioning.
+
+**On-device versus server** is a genuine trade-off: on-device gives privacy, offline capability and no per-inference cost, at the price of app size and inconsistent performance. Server gives one implementation and easy updates, at the price of latency, connectivity and cost.
+
+**Gemini Nano via AICore** is available on a subset of devices, so it must be feature-detected with a fallback — not assumed.
+
+## Failure modes: Native interop
+
+**A WebView is used for login and the identity provider rejects it.** *Symptom:* OAuth fails or is blocked. *Cause:* an embedded WebView. *Fix:* Custom Tabs with PKCE.
+
+**A native crash appears as an unreadable address.** *Symptom:* crash reports with no symbols. *Cause:* debug symbols not uploaded. *Fix:* upload them in CI; `ndk-stack` for local tombstones.
+
+**Memory corruption after a JNI call, far from the cause.** *Symptom:* random crashes with nonsensical stacks. *Cause:* a local reference stored and reused, or a missing `ExceptionCheck`. *Fix:* `NewGlobalRef` with matching deletion; check after every throwing call.
+
+**Battery complaints from a location feature.** *Symptom:* Play Console flags your app; users notice drain. *Cause:* `HIGH_ACCURACY` with a short interval when balanced would do. *Fix:* lower priority, longer interval, batched delivery; consider geofencing.
+
+**A widget shows stale data.** *Symptom:* it updates only every half hour. *Cause:* relying on the system update period. *Fix:* push updates from WorkManager (ch. 9).
+
+**BLE works on your test device and fails widely.** *Symptom:* connection failures across the device matrix. *Cause:* no reconnect handling; permission differences across API levels. *Fix:* treat disconnection as normal; handle the Android 12 permission split.
+
+**A TV or Auto port is unusable.** *Symptom:* items unreachable with a D-pad. *Cause:* focus never designed. *Fix:* explicit focus order and visible focus states.
+
+## Cheat-sheet: Native interop
+
+```kotlin
+// someone else's web content
+CustomTabsIntent.Builder().build().launchUrl(context, url)
+
+// your own web content, with an origin-scoped bridge
+WebViewCompat.addWebMessageListener(webView, "appBridge", setOf("https://example.com")) { ... }
+
+// location: the cheapest priority that works
+LocationRequest.Builder(BALANCED_POWER_ACCURACY, 5.minutes.inWholeMilliseconds)
+    .setMaxUpdateDelayMillis(15.minutes.inWholeMilliseconds)   // let the system batch
+    .build()
+```
+
+```bash
+adb shell ls /data/tombstones/
+ndk-stack -sym <path-to-unstripped-libs> -dump tombstone_00
+adb shell dumpsys sensorservice | head -40
+adb shell dumpsys location | grep -A10 "Location Requests"
+adb shell dumpsys appwidget | grep -A6 <pkg>
+```
+
+| Need | Use |
+|---|---|
+| show someone else's web page | Custom Tabs |
+| embed your own web content | WebView + `WebViewAssetLoader` |
+| OAuth | Custom Tabs, never a WebView |
+| reuse existing C/C++ | the NDK — and budget for the boundary |
+| know roughly where the user is | `BALANCED_POWER_ACCURACY` |
+| react to arriving somewhere | geofencing, not polling |
+| home-screen UI | Glance, updated by WorkManager |
+
+<LabCard module=":ch20-interop">
+Build a Glance widget backed by the same repository as the app (ch. 14) and updated by WorkManager, so the widget and the app can never disagree. Then add one JNI function called from Kotlin, crash it deliberately, and **read the symbolised tombstone** with `ndk-stack`. The second half is the point: a native crash you cannot read is a native crash you cannot fix, and the time to learn the tooling is before it happens in production.
+</LabCard>

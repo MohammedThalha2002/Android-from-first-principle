@@ -1,0 +1,127 @@
+---
+/**
+ * Course home: the contract, then every chapter with its lessons.
+ *
+ * Nothing here is a hand-kept list. Chapters and lessons come from the
+ * content collections and are ordered by their folder prefixes.
+ */
+import { getCollection, render } from 'astro:content';
+import Base from '../../../layouts/Base.astro';
+import Chip from '../../../components/Chip.astro';
+import { getGroup } from '../../../data/groups';
+import { chapterHref, chapterParts, courseSlug, lessonHref, lessonParts, segment } from '../../../lib/courses';
+
+export async function getStaticPaths() {
+  const courses = await getCollection('courses');
+  const chapters = await getCollection('chapters');
+  const lessons = await getCollection('lessons');
+
+  return courses.map((course) => ({
+    params: { group: course.data.group, course: courseSlug(course.id, course.data.group) },
+    props: {
+      course,
+      chapters: chapters.filter((item) => chapterParts(item.id).course === course.id),
+      lessons: lessons.filter((item) => lessonParts(item.id).course === course.id),
+    },
+  }));
+}
+
+const { course, chapters, lessons } = Astro.props;
+const groupId = course.data.group;
+const group = getGroup(groupId);
+const { Content } = await render(course);
+
+const written = lessons.length;
+const planned = course.data.planned?.lessons ?? written;
+const minutes = lessons.reduce((sum, item) => sum + item.data.minutes, 0);
+
+const rows = chapters
+  .map((chapter) => ({
+    chapter,
+    order: chapterParts(chapter.id).chapter.order,
+    lessons: lessons
+      .filter((item) => item.data.chapter === chapterParts(chapter.id).chapter.order)
+      .sort((a, b) => a.data.lesson - b.data.lesson),
+  }))
+  .sort((a, b) => a.order - b.order);
+---
+
+<Base title={course.data.title} description={course.data.tagline} group={groupId} nav="group">
+  <div class="page">
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/">Home</a><span aria-hidden="true">/</span>
+      <a href={`/${groupId}/`}>{group.title}</a><span aria-hidden="true">/</span>
+      <span aria-current="page">{course.data.title}</span>
+    </nav>
+
+    <div class="grid">
+      <header class="card">
+        <div class="card-head" data-tint="accent">
+          <span>Course</span>
+          <span class="num">{written} of {planned} lessons</span>
+        </div>
+        <div class="card-body">
+          <h1 class="course-title">{course.data.title}</h1>
+          <p class="course-tagline">{course.data.tagline}</p>
+          <div class="course-facts">
+            <span><b class="num">{rows.length}</b> chapters</span>
+            <span><b class="num">{written}</b> lessons written</span>
+            <span><b class="num">{Math.round(minutes / 60)}</b> hours</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="card reading">
+        <div class="prose"><Content /></div>
+      </section>
+
+      {rows.map(({ chapter, order, lessons: items }) => (
+        <section class="card">
+          <div class="card-head" data-tint={items.length > 0 ? 'accent' : undefined}>
+            <span>Chapter {order} · {chapter.data.title}</span>
+            {items.length > 0
+              ? <span class="faint num">{items.length} lessons</span>
+              : <Chip tint="grey">Coming soon</Chip>}
+          </div>
+          <div class="card-body">
+            <p class="chapter-proves">{chapter.data.proves}</p>
+          </div>
+          {items.length > 0 && (
+            <div class="row-list lesson-rows">
+              {items.map((item) => (
+                <a href={lessonHref(item.id, groupId)}>
+                  <span class="faint num">{item.data.chapter}.{item.data.lesson}</span>
+                  <span class="row-title">
+                    {item.data.title}
+                    <span class="row-motto">{item.data.motto}</span>
+                  </span>
+                  <span class="row-chips">
+                    {item.data.stage === 'draft' && <span class="chip" data-tint="amber">Draft</span>}
+                    {item.data.stage === 'outline' && <span class="chip" data-status="new">Outline</span>}
+                  </span>
+                  <span class="row-meta num">{item.data.minutes} min</span>
+                </a>
+              ))}
+            </div>
+          )}
+        </section>
+      ))}
+    </div>
+  </div>
+</Base>
+
+<style>
+  .course-title { font-size: var(--text-3xl); margin: 0 0 var(--space-3); }
+  .course-tagline { color: var(--ink-2); font-size: var(--text-read); max-width: var(--measure); }
+  .course-facts { color: var(--ink-3); display: flex; flex-wrap: wrap; font-size: var(--text-sm); gap: var(--space-4); margin-top: var(--space-4); }
+  .course-facts b { color: var(--ink); font-weight: var(--weight-bold); }
+  .chapter-proves { color: var(--ink-2); font-size: var(--text-sm); line-height: var(--leading-read); max-width: var(--measure); }
+
+  .lesson-rows > a { grid-template-columns: 2.4rem minmax(0, 1fr) auto auto; align-items: baseline; }
+  .row-motto { color: var(--ink-3); display: block; font-size: var(--text-sm); font-weight: var(--weight-regular); margin-top: 2px; }
+  .row-chips { display: flex; gap: var(--space-1); }
+  @media (max-width: 640px) {
+    .lesson-rows > a { grid-template-columns: 2.4rem minmax(0, 1fr) 3.5rem; }
+    .row-chips { display: none; }
+  }
+</style>

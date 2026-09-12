@@ -1,0 +1,407 @@
+---
+title: "How a process is told to stop"
+motto: "One signal asks your process a question. The other one does not ask."
+course: android-internals
+chapter: 1
+lesson: 7
+type: mechanism
+minutes: 20
+prerequisites: ["1.1", "1.3"]
+objectives:
+  - "Say what a signal is and what it carries"
+  - "Explain why no code of yours runs when the system reclaims your process"
+  - "Say where the thread dump in an ANR report comes from"
+  - "Choose a place to save that the system actually reaches"
+  - "Answer an interviewer who asks why onDestroy is not a save point"
+terms: ["signal", "SIGKILL", "SIGQUIT"]
+verifiedOn: "documentation checked; device transcripts still to capture"
+stage: published
+sources: ["posts/android/linux-for-android-engineers#Signals: how a process is told to stop"]
+---
+
+## You will
+
+- Say what a signal is and what it carries
+- Explain why no code of yours runs when the system reclaims your process
+- Say where the thread dump in an ANR report comes from
+- Choose a place to save that the system actually reaches
+- Answer an interviewer who asks why `onDestroy` is not a save point
+
+## The question
+
+There is a text editor in your app. You save the draft in `onDestroy`, which is
+where cleanup goes.
+
+You test it. Press Back, reopen, the draft is there. Rotate, reopen, the draft
+is there. Ship it.
+
+Then the support messages start. People lose drafts. Not everyone, not
+reliably, and never on your phone. Your crash reporter shows nothing at all,
+because nothing crashed.
+
+The belief underneath the bug is one most Android developers carry:
+
+> `onDestroy` runs when my app is killed. That's what it's for.
+
+What most developers picture:
+
+```text
+the system kills the app
+   ↓
+onDestroy runs
+   ↓
+I save
+   ↓
+the app goes away
+```
+
+What actually happens in the case that matters:
+
+```text
+the system wants the memory
+   ↓
+the kernel delivers a signal
+   ↓
+the process stops existing
+   ↓
+nothing of yours ran
+```
+
+## What is actually happening
+
+### A signal is a number, and that is all
+
+A **signal** is the kernel's way of telling a process something. It has a
+number, it has a name, and it carries nothing else. No message, no data, no
+explanation.
+
+Most signals can be caught: a process can register a handler and decide what to
+do when one arrives. Two cannot be caught by anything, and one of those is the
+one Android uses.
+
+### SIGKILL cannot be caught
+
+Signal number 9. **SIGKILL** does not ask. There is no handler, because the
+kernel does not let a process register one. The process stops between one
+instruction and the next.
+
+Nothing runs afterwards. Not a `finally` block, not a shutdown hook, not a
+coroutine cleanup, and not `onDestroy`. There is no code left to run it in.
+
+This is what Android sends when it reclaims a process for memory. It is also
+what a force stop sends, and what swiping an app away from Recents usually
+leads to.
+
+<Figure src="hero" caption="Two signals arriving at the same process. One is caught and answered, the other ends it where it stands." />
+
+### SIGQUIT is caught, and the runtime does something useful with it
+
+Signal number 3. **SIGQUIT** can be caught, and the Android runtime catches it.
+Instead of stopping, it writes out what every thread in the process is doing
+right now: which method each one is in, and what it is waiting for.
+
+Then the process carries on as if nothing happened.
+
+That dump is not a debugging curiosity. It is what an ANR report is made of.
+When the system decides your app is not responding, it asks for this dump
+first, which is why an ANR gives you a picture of every thread and never a
+stack trace of something that threw.
+
+### Which one arrives, and when
+
+Pressing Back is not a signal at all. The framework calls your lifecycle
+callbacks in a process that is alive and stays alive, which is exactly why your
+testing passed.
+
+Think of two kinds of message from a building manager. The first is a note
+under the door asking you to finish up and leave, and you can decide what to
+take with you. The second is the power being cut without warning. The analogy
+stops in one place worth remembering: the power cut is not a punishment and
+does not mean you did anything wrong. Reclaiming your process is ordinary,
+expected behaviour, and it will happen to a healthy app several times a day.
+
+<Check n={1} />
+
+## Connect it to your code
+
+Here is the bug, in full.
+
+```kotlin
+// ui/EditorFragment.kt
+override fun onDestroy() {
+    super.onDestroy()
+    // Runs when the user leaves the screen. Does not run when the
+    // system takes the process.
+    draftRepository.save(editor.text)
+}
+```
+
+It is not that `onDestroy` is unreliable in some vague way. It is that in the
+one case you are trying to protect against, there is no process left to call
+it.
+
+> There is no callback at the end. Save when the value changes, or at the last
+> point the system reaches while your process is still alive.
+
+What actually runs, case by case:
+
+| What happened | What the system runs |
+|---|---|
+| The user presses Back, or you call `finish()` | `onPause`, `onStop`, `onDestroy` |
+| A configuration change, such as rotation | `onDestroy`, then `onCreate` again |
+| The user leaves, then the system reclaims the process | `onPause` and `onStop` ran when they left. `onDestroy` does not run |
+| The user force stops the app from Settings | nothing |
+| An uncaught exception | your handler, then the process ends |
+
+Row three is the one that produces support tickets. The callbacks you got were
+the ones that ran twenty minutes earlier, when the user switched away. That is
+the moment to have saved.
+
+<Check n={2} />
+
+## See it on your phone (optional)
+
+You can skip this. Nothing later depends on it.
+
+Put a log line in `onDestroy`, then watch the log while you end the app two
+different ways.
+
+{/* VERIFY: capture both cases on the verification device before this leaves draft */}
+
+```bash
+adb logcat -s Probe
+```
+
+Press Back on the device. The framework is finishing your Activity inside a
+live process, so your code runs:
+
+```console
+D Probe   : onDestroy: saving draft
+```
+
+Now reopen the app, press Home, and end the process instead:
+
+```bash
+adb shell am kill dev.firstprinciples.android
+```
+
+Nothing is printed. Not an error, not a warning, nothing. That silence is the
+lesson.
+
+## When it breaks
+
+**A crash-free rate that looks perfect while users lose data.**
+
+Nothing threw, so nothing reaches your crash reporter and your crash-free rate
+stays at 99.9 percent. The only other evidence is users telling you, which is
+the slowest feedback loop there is.
+If you want to see it, the system keeps a record of why recent processes of
+your app ended.
+
+<ApiLevel min="30" />
+
+```kotlin
+// debug/ExitReasons.kt
+val manager = context.getSystemService(ActivityManager::class.java)
+val reasons = manager.getHistoricalProcessExitReasons(context.packageName, 0, 10)
+// each entry has a reason, a description and a timestamp
+```
+
+**Force stop stops more than the process.**
+
+After a user force stops your app from Settings, your scheduled work and your
+alarms do not run either, and they stay stopped until the user launches the app
+again. A background sync that silently stops for a handful of users is often
+this and nothing else.
+
+<Check n={3} />
+
+## Your notes
+
+```text
+SIGNAL = a number, nothing else
+
+SIGQUIT  3   catchable
+   ↓  runtime catches it
+writes what every thread is doing
+   ↓
+process carries on
+   ↓
+this dump is the ANR report
+
+SIGKILL  9   not catchable
+   ↓
+process stops mid-instruction
+   ↓
+no finally, no onDestroy, no code
+```
+
+- A signal carries a number and no information.
+- `SIGKILL` cannot be caught, so nothing of yours runs when it arrives.
+- The system sends it to reclaim memory, on force stop, and usually on a swipe
+  from Recents.
+- `SIGQUIT` is caught by the runtime, which dumps every thread and continues.
+- That dump is what an ANR report contains, which is why it has no exception.
+- Save when a value changes, not on the way out. There is no callback at the
+  end.
+
+## Interview questions
+
+Answer out loud first, then open the model answer.
+
+**1. (Easy)** What is a signal, in operating system terms?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- A message from the kernel to a process, identified by a number and a name.
+- It carries no payload: the number is the whole message.
+- Most can be caught by a handler the process registers.
+- A couple cannot be caught at all, and `SIGKILL` is one of them.
+
+**A weak answer** describes it as "a way to kill a process", which covers one
+signal out of dozens and misses why the distinction matters.
+</details>
+
+**2. (Easy)** Why can a process not clean up after receiving `SIGKILL`?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- The kernel does not allow a handler to be registered for it.
+- The process is removed between one instruction and the next.
+- So no `finally` block, no shutdown hook and no lifecycle callback runs.
+- That is deliberate: a signal a process can refuse would be no use for
+  reclaiming memory.
+
+**A weak answer** says the system does not give it enough time. There is no
+time involved; there is no handler at all.
+</details>
+
+**3. (Medium)** A developer saves a draft in `onDestroy`. It passes every test
+and users still lose data. Walk me through what is happening.
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Their tests end the screen with Back or a rotation, and in both cases the
+  process is alive, so `onDestroy` runs.
+- In production the user switches away and the system later reclaims the
+  process with a signal nothing can catch.
+- `onPause` and `onStop` ran when the user left. `onDestroy` never runs.
+- The fix is to save when the value changes, or at the last callback that
+  happens while the app is still there.
+
+**A weak answer** says `onDestroy` is "not guaranteed" and moves on. The
+interviewer wants to hear why, and the why is that there is no process left.
+</details>
+
+**4. (Medium)** An ANR report shows what every thread in the app was doing.
+Where does that come from?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- The system sends `SIGQUIT` to the process.
+- The runtime catches it and writes out the state of every thread.
+- The process keeps running afterwards, so the dump is a snapshot rather than a
+  post-mortem.
+- That is why an ANR report has no exception and no single throwing line: it is
+  a picture of a process that was still alive and busy.
+
+**A weak answer** assumes the report is a crash dump, which sends people
+looking for a stack trace that was never thrown.
+</details>
+
+**5. (Hard)** After the fact, how would you find out why a user's process went
+away?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Not from the crash reporter: process death is not a crash and produces no
+  exception.
+- The system keeps a short history of why recent processes of your app ended,
+  readable from your own app.
+- Each record has a reason, such as low memory, a user request, or an ANR, plus
+  a timestamp.
+- You read it on the next launch and report it yourself, because nothing else
+  will.
+
+**A weak answer** suggests logging in `onDestroy`, which is the very thing that
+does not run in this case.
+</details>
+
+**6. (Hard)** A user force stops your app from Settings. What stops besides the
+process?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- The process ends with a signal it cannot catch, so no code runs.
+- The app is also put into a stopped state, so its scheduled work, alarms and
+  broadcasts do not fire.
+- None of that resumes until the user launches the app again themselves.
+- So a background feature that quietly stops for a small number of users is
+  often a force stop rather than a bug in the scheduling code.
+
+**A weak answer** stops at "the app is killed", which explains the process and
+not the week of missing sync data.
+</details>
+
+**7. (The one that matters)** Explain why `onDestroy` is not a save point, in
+four sentences.
+
+<details>
+<summary>Model answer</summary>
+
+`onDestroy` is a call the framework makes into a process that is alive, so it
+happens when the user presses Back or the screen is recreated. When the system
+needs memory it does not make a call at all: it has the kernel deliver
+`SIGKILL`, which no process can catch, and the process stops between two
+instructions. Nothing runs after that, which is why no `finally` block, shutdown
+hook or lifecycle callback of mine will save anything. So the place to save is
+when the value changes, or at the last callback the system makes while the app
+is still on the device's screen.
+</details>
+
+## Words you met
+
+| Term | What people say | What it actually means |
+|---|---|---|
+| Signal | "the system killed it" | A message from the kernel to a process, made of a number and nothing else. |
+| SIGKILL | "force kill" | Signal 9, which no process can catch or handle. It ends the process immediately, running none of its code. |
+| SIGQUIT | "quit" | Signal 3, which the Android runtime catches by writing out what every thread is doing and then carrying on. The ANR report is made of that dump. [ANRs](https://developer.android.com/topic/performance/vitals/anr) |
+
+## Go deeper
+
+- [ANRs](https://developer.android.com/topic/performance/vitals/anr): what the system waits for, and how to read the dump that `SIGQUIT` produced.
+- [ApplicationExitInfo](https://developer.android.com/reference/android/app/ApplicationExitInfo): the record of why each recent process of your app ended, and the reason codes it uses.
+- [Processes and app lifecycle](https://developer.android.com/guide/components/activities/process-lifecycle): where your app sits in the ranking that decides who gets reclaimed first.
+
+**What to skip for now**
+
+- The full list of signals and their handlers: not in this course.
+- Reading and interpreting a real ANR trace: the performance course.
+- Which lifecycle callback to save in, and how saved state is restored: the lifecycle course.
+
+## Where this goes next
+
+That is the chapter. Your app is a process, running as its own user, with one
+thread that matters, copied from a parent, and ended by a signal you never see.
+
+The next chapter goes back before all of it, to what the phone was doing between
+the power button and the home screen, and to the parent process every app on the
+device was copied from.

@@ -1,0 +1,29 @@
+---
+import Base from '../layouts/Base.astro';
+import { groups } from '../data/groups';
+---
+
+<Base title="Page not found" description="That page does not exist.">
+  <div class="page">
+    <section class="card notfound">
+      <div class="card-head" data-tint="amber"><span>404</span></div>
+      <div class="card-body">
+        <h1>That page does not exist.</h1>
+        <p class="muted">A post may have been renamed, or the link may be from an older version of the site.</p>
+        <div class="notfound-actions">
+          <a class="btn" href="/">Back to home</a>
+          {groups.map((group) => (
+            <a class="btn btn-ghost" href={`/${group.id}/`}>{group.title}</a>
+          ))}
+        </div>
+      </div>
+    </section>
+  </div>
+</Base>
+
+<style>
+  .notfound { margin: 0 auto; max-width: 46rem; }
+  .notfound h1 { font-size: var(--text-2xl); }
+  .notfound p { margin-top: var(--space-3); }
+  .notfound-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-5); }
+</style>

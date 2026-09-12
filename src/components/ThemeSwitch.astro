@@ -1,0 +1,64 @@
+---
+// Tri-state theme control, lives in the chrome. The pre-paint script in
+// Base.astro owns the initial stamp; this handles clicks and persistence.
+---
+<div class="theme-switch" role="group" aria-label="Theme">
+  <button type="button" data-theme-choice="system" title="Follow system">Auto</button>
+  <button type="button" data-theme-choice="light" title="Light">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/></svg>
+  </button>
+  <button type="button" data-theme-choice="dark" title="Dark">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8.2 8.2 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></svg>
+  </button>
+</div>
+
+<script>
+  const choices = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-theme-choice]'));
+
+  function applyTheme(theme: string) {
+    if (theme === 'light' || theme === 'dark') {
+      document.documentElement.dataset.theme = theme;
+      try { localStorage.setItem('theme', theme); } catch {}
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+      try { localStorage.setItem('theme', 'system'); } catch {}
+    }
+    choices.forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.themeChoice === theme)));
+    window.dispatchEvent(new CustomEvent('theme-change', { detail: theme }));
+  }
+
+  let stored = 'system';
+  try { stored = localStorage.getItem('theme') || 'system'; } catch {}
+  applyTheme(stored);
+  choices.forEach((button) => button.addEventListener('click', () => applyTheme(button.dataset.themeChoice || 'system')));
+</script>
+
+<style>
+  .theme-switch {
+    background: var(--chrome-2);
+    border: 1px solid var(--chrome-line);
+    border-radius: var(--radius-pill);
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+  }
+  .theme-switch button {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-pill);
+    color: var(--chrome-ink-2);
+    cursor: pointer;
+    display: inline-flex;
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-bold);
+    height: 1.75rem;
+    justify-content: center;
+    line-height: 1;
+    min-width: 1.75rem;
+    padding: 0 0.5rem;
+  }
+  .theme-switch button:hover { color: var(--chrome-ink); }
+  .theme-switch button[aria-pressed='true'] { background: var(--chrome-active); color: var(--chrome-active-ink); }
+  .theme-switch svg { height: 0.9rem; width: 0.9rem; }
+</style>

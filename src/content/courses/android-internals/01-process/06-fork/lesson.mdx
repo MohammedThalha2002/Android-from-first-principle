@@ -1,0 +1,410 @@
+---
+title: "Where your process came from"
+motto: "Forking copies the table, not the memory. That one trick is why apps start fast."
+course: android-internals
+chapter: 1
+lesson: 6
+type: mechanism
+minutes: 25
+prerequisites: ["1.1", "1.2"]
+objectives:
+  - "Explain what it means to fork a process"
+  - "Say what the kernel actually copies, and what it does not"
+  - "Explain copy-on-write in terms of page table entries"
+  - "Say why Android forks without doing what a shell does next"
+  - "Separate the startup cost the platform already paid from the cost your app adds"
+terms: ["fork", "copy-on-write", "exec"]
+verifiedOn: "documentation checked; device transcripts still to capture"
+stage: published
+sources: ["posts/android/linux-for-android-engineers#fork(), and what a copy shares"]
+---
+
+## You will
+
+- Explain what it means to fork a process
+- Say what the kernel actually copies, and what it does not
+- Explain copy-on-write in terms of page table entries
+- Say why Android forks without doing what a shell does next
+- Separate the startup cost the platform already paid from the cost your app adds
+
+## The question
+
+Start a Java program on a laptop and you wait a second while the runtime comes
+up and classes load.
+
+Your app is bigger than that program, running on slower hardware, and it puts a
+screen up in a few hundred milliseconds. So does every other app on the phone.
+
+The usual explanation is not one:
+
+> Android starts the app. It's optimised.
+
+What makes this answerable now is lesson 1.2. You know a process is an address
+space described by a page table, and that the table is what the hardware reads.
+Hold on to that, because the trick is done to the table.
+
+What most developers picture:
+
+```text
+tap the icon
+   ↓
+start a runtime
+   ↓
+load the framework
+   ↓
+load my code
+   ↓
+my screen
+```
+
+What actually happens:
+
+```text
+at boot, one process loads
+the runtime and the framework
+   ↓  then waits
+tap the icon
+   ↓
+copy that process
+   ↓
+load my code into the copy
+   ↓
+my screen
+```
+
+The first three steps happened once, before the phone finished booting.
+
+## What is actually happening
+
+### A new process is made by copying an old one
+
+On Linux a process is almost never built from nothing. An existing process calls
+**fork**, and the kernel produces a second process that is a copy of the first.
+
+The child has the same code loaded, the same objects in memory, the same open
+files, and it continues from the same place. What it does not inherit is
+identity: it gets its own process id, and on Android it is then given its own
+user id and its own name.
+
+### What gets copied is the page table
+
+Copying the memory of a process with a hundred megabytes loaded would take
+longer than loading it again, so the kernel does not copy memory at all.
+
+It copies the **page table**. The child gets its own table whose entries point
+at exactly the same physical pages as the parent's. Two tables, one set of
+pages.
+
+Then the kernel marks every one of those entries read-only, in both tables.
+
+### Copy-on-write is that mark being hit
+
+When either process writes to one of those pages, the hardware notices the
+read-only entry and traps into the kernel. This is the same crossing into
+kernel space you met in the last lesson, except the processor opens the door
+rather than your code.
+
+The kernel then does the smallest possible thing: it copies that one page,
+points the writer's entry at the new copy, makes that entry writable again, and
+lets the write proceed. The other process still points at the original.
+
+That is **copy-on-write**. Forking is fast because it is table bookkeeping, and
+it stays cheap for as long as nobody writes.
+
+<Figure src="hero" caption="One parent with the framework loaded, two children copied from it, and a single page that becomes private only when it is written to." />
+
+### Android forks and then does not do the next thing
+
+On a desktop, `fork` is almost always followed by **exec**, which throws away
+everything the child inherited and loads a different program in its place. That
+is how a shell runs a command: copy itself, then replace the copy.
+
+Android deliberately skips the second half. It forks the process that already
+has the runtime and the framework loaded, and never execs, so the child keeps
+all of it. Instead it specialises: takes its user id, its name, and loads the
+app's own classes into what is already there.
+
+That is the whole trick. By the time your first line runs, the expensive work
+was done in another process before you tapped anything. Chapter 2 is about that
+process and what it chose to load.
+
+Think of a reference book chained to a desk. Everyone reads the same copy, and
+the moment you want to write in a margin you are handed a photocopy of that one
+page. The analogy stops in two places: the book was assembled once at boot and
+never re-read, and nobody can see anyone else's margin notes.
+
+<Check n={1} />
+
+## Connect it to your code
+
+The platform's startup cost was paid once, at boot, for every app. Yours is
+paid at every cold start, in your process, while the user looks at a blank
+screen.
+
+```kotlin
+// ProbeApp.kt
+class ProbeApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        Analytics.start(this)      // paid on every cold start
+        ImageLoader.warm(this)     // paid on every cold start
+        Database.open(this)        // paid on every cold start
+    }
+}
+```
+
+None of that was in the parent, so none of it benefits from the fork. Your
+classes are loaded into your process, from storage, every time a new one is
+created.
+
+> The framework is free because it was loaded before your app existed.
+> Everything you add at startup is not, and you pay it again on every cold
+> start.
+
+What is in memory before your first line runs:
+
+| Already there, inherited | Loaded in your process, every time |
+|---|---|
+| The runtime | Your `Application` class |
+| Framework classes such as `Activity` and `View` | Your Activities and composables |
+| System resources and fonts | Your dependency graph |
+| Shared native libraries | Your database and network client |
+
+Reading a startup trace comes down to this: the left column costs you nothing,
+and everything you move into the right column costs every user, every launch.
+
+<Check n={2} />
+
+## See it on your phone (optional)
+
+You can skip this. Nothing later depends on it.
+
+`ps` prints the process id and, immediately after it, the id of the process
+that created it.
+
+{/* VERIFY: capture on the verification device before this leaves draft */}
+
+```bash
+adb shell ps -A | grep -E "zygote|firstprinciples"
+```
+
+```console
+root      1284  1  ... zygote64
+u0_a412   9871  1284  ... dev.firstprinciples.android
+```
+
+The process ids will be different on your device, but the relationship will
+not: the second number on your app's line is the first number on the other
+line. Try it with any other app and you get the same parent.
+
+## When it breaks
+
+**Your `Application.onCreate` runs twice.**
+
+A component declared with `android:process` in the manifest runs in a second
+process, and a second process is a second fork with its own page table, its own
+statics and its own `Application` instance. Your startup code runs again, and
+your singletons exist twice without knowing about each other.
+
+The symptom is a log line appearing twice, a database opened twice, or a counter
+that reads about half of what it should.
+
+**Memory numbers that do not add up.**
+
+Add up the memory reported for every running app and the total exceeds what the
+phone has. Pages shared between processes are counted in every table that
+points at them, so the same framework is charged to everyone. Lesson 3.4 is
+about reading those numbers honestly.
+
+<Check n={3} />
+
+## Your notes
+
+```text
+AT BOOT
+one process loads runtime + framework
+        ↓  waits
+TAP
+        ↓  fork
+kernel copies the PAGE TABLE, not the pages
+both tables point at the same physical pages
+every entry marked read-only
+        ↓  a process writes
+hardware traps into the kernel
+        ↓
+copy that ONE page
+point the writer's entry at the copy
+make it writable, let the write finish
+        ↓
+everything unwritten stays shared
+
+shell:   fork + exec  (replace the program)
+Android: fork, no exec (keep everything loaded)
+```
+
+- A new process is made by copying an existing one, with `fork`.
+- The kernel copies the page table, not the memory it describes.
+- Every shared entry is marked read-only, in both tables.
+- A write traps, the kernel copies that one page, and only the writer moves.
+- Android forks without exec, which is why the child keeps the loaded framework.
+- Your own startup cost is paid in your process, on every cold start.
+
+## Interview questions
+
+Answer out loud first, then open the model answer.
+
+**1. (Easy)** What does it mean to fork a process?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- A running process asks the kernel for a copy of itself.
+- The child has the same loaded code, the same objects and the same open files.
+- It gets its own process id, and on Android its own user id afterwards.
+- It continues from the same point rather than starting at the beginning.
+
+**A weak answer** says fork starts a new process, which drops the only
+interesting word in the question.
+</details>
+
+**2. (Easy)** Why does an Android app start faster than a comparable program on
+a desktop runtime?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- The runtime and the framework were loaded once, at boot, in another process.
+- Launching an app forks that process rather than repeating the work.
+- Forking copies a table rather than memory, so it is cheap even for a large
+  process.
+- What remains is loading the app's own classes, which is the part that varies.
+
+**A weak answer** credits ahead-of-time compilation, which matters too and is a
+different mechanism with its own lesson.
+</details>
+
+**3. (Medium)** Walk me through copy-on-write.
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- After a fork, both processes have their own page table pointing at the same
+  physical pages.
+- Every shared entry is marked read-only in both tables.
+- A write hits that mark and traps into the kernel.
+- The kernel copies that single page, repoints the writer's entry at the copy
+  and makes it writable.
+- Everything nobody writes to stays shared for the life of the processes.
+
+**A weak answer** says "memory is copied when it changes" without the table or
+the trap, which is the difference between naming the behaviour and explaining
+it.
+</details>
+
+**4. (Medium)** A shell runs a command with fork followed by exec. Android forks
+and never execs. Why?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- `exec` replaces everything the child inherited with a different program.
+- That is what a shell wants: a copy of itself is not the program you typed.
+- Android wants the opposite. The inherited runtime and framework are the whole
+  point.
+- So it keeps them and specialises instead: new user id, new name, then the
+  app's own classes.
+
+**A weak answer** does not know what exec does, and then cannot explain what is
+unusual about Android's startup at all.
+</details>
+
+**5. (Hard)** Ten apps are running. Does the framework occupy ten times its size
+in memory, and what does that do to per-app numbers?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- No. Those pages are loaded once and pointed at by ten page tables.
+- Tools that report memory per process count shared pages in each process, so
+  the totals overlap.
+- Adding up every app's reported memory gives a number larger than the device
+  has.
+- To judge an app's real cost you have to look at what is private to it.
+
+**A weak answer** quotes one number without asking whether it is private or
+shared, which is how a team ends up optimising something that costs nothing.
+</details>
+
+**6. (Hard)** A developer reports that `Application.onCreate` runs twice on one
+launch. What happened?
+
+<details>
+<summary>Model answer</summary>
+
+**Hit these points**
+
+- Something in the manifest declares `android:process`, so the app runs in more
+  than one process.
+- Each process is its own fork with its own address space, statics and
+  `Application` object.
+- So startup code runs once per process, and singletons are not shared between
+  them.
+- The fix is either to remove the extra process or to guard the work by
+  checking which process is running.
+
+**A weak answer** blames the Activity lifecycle. `Application.onCreate` is once
+per process, so twice means two processes.
+</details>
+
+**7. (The one that matters)** Explain why Android app startup is fast, to an
+interviewer, in four sentences.
+
+<details>
+<summary>Model answer</summary>
+
+Early in the boot, one process loads the runtime and the framework classes that
+every app needs, and then waits. Launching an app forks that process, and
+forking copies the page table rather than the memory, so the child points at
+the same physical pages and nothing is duplicated until somebody writes. Unlike
+a shell, Android never execs afterwards, so the child keeps everything that was
+already loaded and only has to specialise itself and load the app's own
+classes. That means the expensive part of startup happened once at boot for
+every app on the device, and what is left per launch is the part the app's own
+developers control.
+</details>
+
+## Words you met
+
+| Term | What people say | What it actually means |
+|---|---|---|
+| Fork | "starting a process" | A running process asking the kernel for a copy of itself. The kernel copies the page table, and the child continues from the same point. |
+| Copy-on-write | "shared memory" | Shared page table entries marked read-only, so the first write traps and the kernel copies just that page for the writer. |
+| exec | "running a program" | Replacing everything a process has loaded with a different program. A shell does it after forking; Android deliberately does not. |
+
+## Go deeper
+
+- [Memory allocation among processes](https://developer.android.com/topic/performance/memory-management): how Android describes sharing pages between processes, and where the reported numbers come from.
+- [App startup time](https://developer.android.com/topic/performance/vitals/launch-time): what cold, warm and hot mean, and what each one skips.
+
+**What to skip for now**
+
+- The name of the parent process and what it preloads: lesson 2.3.
+- Reading `dumpsys meminfo` and telling private from shared: lesson 3.4.
+- Why the first launch after an install is slower than later ones: lesson 3.3.
+
+## Where this goes next
+
+Your process exists, it has an address space, threads, cores to run them on,
+one door to the outside and a parent it was copied from. The last lesson in this
+chapter is about how it ends, which turns out to explain why `onDestroy` is not
+the place to save anything.

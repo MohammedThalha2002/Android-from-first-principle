@@ -1,0 +1,304 @@
+---
+title: "Boot, Zygote & the Runtime"
+navTitle: "Zygote & the runtime"
+summary: "Why a static resets while the screen survives, why the first run is slowest, and why a release build breaks: the process template, the heap, and the compiler."
+readingTime: "2 hours"
+minutes: 90
+tags: ["process","process death","saved state","am kill","system server","binder","transactiontoolargeexception","r8","reflection","keep rule","apkanalyzer","cold start","am start","contentprovider","merged manifest","sandbox","run-as","uid","zygote","dex"]
+draft: true
+date: "2026-04-11"
+subtopic: "android-internals"
+subtopicOrder: 2
+part: "I"
+verifiedAgainst: "compileSdk 36 · AGP 8.13 · Kotlin 2.3 · platform-tools 36"
+stage: "outline"
+labModule: ":ch02-runtime"
+sources: ["01-platform-from-the-ground-up#Watch your app die and come back","01-platform-from-the-ground-up#Why a release build breaks when debug works"]
+---
+Why a static resets while the screen survives, why the first run is slowest, and why a release build breaks: the process template, the heap, and the compiler.
+
+<Callout kind="note" title="Being restructured">
+The sections below were moved here from the first draft, unedited, and are being rewritten lesson by lesson. Cross-references have been re-pointed to the new chapter numbers; a few may still name the old chapter until that lesson is rewritten.
+</Callout>
+
+## Watch your app die and come back
+
+**You will:** see the system kill your app while it still appears in Recents, and see which of two values survives.
+**You need:** a Compose screen you can edit, and `adb` working.
+**Time:** about 15 minutes.
+**Built with:** compileSdk 36, AGP 8.13, Kotlin 2.3.
+
+### The problem you can see
+
+Put two counters on one screen. The first lives in a `companion object`, which is Kotlin's version of a static field: one copy for the whole app, set when the class is first loaded. The second is ordinary saveable UI state.
+
+```kotlin
+// MainActivity.kt
+class MainActivity : ComponentActivity() {
+
+    companion object {
+        // Set once, the first time this class loads.
+        val startedAt: String = SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(Date())
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            var taps by rememberSaveable { mutableStateOf(0) }
+            Column(Modifier.padding(24.dp)) {
+                Text("Started at: $startedAt")
+                Text("Taps: $taps")
+                Button(onClick = { taps++ }) { Text("Tap") }
+            }
+        }
+    }
+}
+```
+
+Run it. Tap five times. Note the time on screen. Press Home. Then, in a terminal:
+
+```bash
+adb shell am kill dev.firstprinciples.android
+```
+
+Open the app again from Recents.
+
+**Taps: 5. Started at: a new time.**
+
+Your screen came back exactly as you left it. But `startedAt` changed, which means the class loaded again, which means everything in your app was thrown away and rebuilt. You never closed it.
+
+### What is actually happening
+
+Your app runs inside a **process**. A process is the operating system's box for one running program: all your objects live in it, including every `companion object` and every singleton.
+
+On Android, you do not own that box. The moment your app is not on screen, the system may destroy the process to get its memory back. It does this without warning and without running any of your code. It happens to real users many times a day, and the user never notices, because of what happens next.
+
+Before your screen went to the background, Android asked it to write down a small amount of **saved state**. `rememberSaveable` writes into it, and so does `onSaveInstanceState`. Android keeps that saved state *outside* your process. When the user comes back, Android starts a brand-new process, loads your classes again, and hands the saved state back. `taps` was in the saved state, so it came back. `startedAt` was in the old process, so it was rebuilt from scratch.
+
+This is called **process death**, and it is the single most common cause of "it sometimes shows a blank screen and I cannot reproduce it". You cannot reproduce it because the normal gestures do not cause it. Rotation rebuilds your screen but keeps the process. Pressing Home usually leaves the process alive. Swiping the app away from Recents removes the task, which is a different thing. Only the command you ran does what the system does.
+
+### Seeing it, step by step
+
+#### Step 1: run, tap, and note the time
+
+**What you should see:** `Taps: 5` and a start time that matches your clock.
+
+#### Step 2: rotate the device
+
+**What you should see:** both values unchanged.
+
+**Why:** rotation destroys and recreates your Activity, but the process stays alive. `rememberSaveable` restored `taps`, and `startedAt` was never touched because the class was already loaded.
+
+#### Step 3: kill the process the way the system does
+
+Press Home first. Then:
+
+```bash
+adb shell am kill dev.firstprinciples.android
+adb shell ps -A | grep dev.firstprinciples
+```
+
+**What you should see:** the second command prints nothing. The process is gone. (`ps` lists running processes; your app is one of them until it is not.)
+
+**Why:** `am kill` tells the system to kill your app's process while keeping its saved state. That is exactly what happens under memory pressure. If you did not press Home first, the command may do nothing, because the system will not kill the app the user is looking at.
+
+#### Step 4: come back
+
+Open the app from Recents.
+
+**What you should see:** `Taps: 5`, and a new start time.
+
+### When it breaks
+
+**A crash only some users see, and you never do.**
+
+```
+kotlin.UninitializedPropertyAccessException: lateinit property repository has not been initialized
+```
+
+The property was set during startup by code that assumes the app has been running all along. After process death the screen came back but that startup path did not run. Reproduce it with `am kill`, never by swiping the app away.
+
+**A cache that is mysteriously empty, or a logged-in user who is suddenly null.** Same cause. Something kept only in memory was treated as the source of truth for a screen that can be restored without it.
+
+**"It works, I swiped it away and reopened it."** That is not process death, so the test proved nothing.
+
+### Try it yourself
+
+Before you run it: repeat the steps, but use this instead of `am kill`:
+
+```bash
+adb shell am force-stop dev.firstprinciples.android
+```
+
+Predict `Taps` when you reopen.
+
+**Answer:** `Taps: 0`. `force-stop` kills the process *and* throws away the saved state. That is what happens after a crash or when the user force-stops you from Settings. `am kill` is the one that reproduces the system reclaiming memory, and it is the one that finds the bug above.
+
+### Words you met
+
+**Process**: the operating system's box for one running program and all its objects. [Platform architecture](https://developer.android.com/guide/platform)
+
+**Process death**: the system destroying your backgrounded process for memory, then rebuilding your screen from saved state when the user returns. [Android runtime and Dalvik](https://source.android.com/docs/core/runtime)
+
+**Saved state**: the small bundle Android keeps outside your process; `rememberSaveable` and `onSaveInstanceState` write into it. [Parcelables and bundles](https://developer.android.com/guide/components/activities/parcelables-and-bundles)
+
+**`am kill`**: kills your process and keeps saved state. `am force-stop` kills it and discards the state. [Android Debug Bridge](https://developer.android.com/tools/adb)
+
+<Callout kind="note" title="Go deeper (optional)">
+Why is starting a new process so cheap that Android does it casually? Because it never starts one from nothing. A process called **Zygote** boots once, loads the Android framework, then waits. Every app process is a **fork** of Zygote: a copy that shares the framework's memory until it writes to it. Only your own classes are new in each copy, which is exactly why your `companion object` reset and the framework did not. The source is [`ZygoteInit.java`](https://cs.android.com/android/platform/superproject/+/master:frameworks/base/core/java/com/android/internal/os/ZygoteInit.java).
+</Callout>
+
+<Diagram
+  caption="Zygote forks; it does not start. Preloaded classes and resources are shared copy-on-write, so a second app process costs almost nothing to create."
+  label="Zygote preloads the runtime, framework classes and resources at boot, then forks to create each app process. Forked children share the preloaded pages copy-on-write and inherit fresh static state."
+>
+  <svg viewBox="0 0 660 258" width="660" height="258">
+    <rect x="14" y="60" width="176" height="126" rx="8" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="102" y="82" text-anchor="middle" font-family="var(--font-mono)" font-size="12" fill="var(--dg-accent)">Zygote</text>
+    <text x="102" y="100" text-anchor="middle" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">started once at boot</text>
+    <rect x="28" y="112" width="148" height="20" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="102" y="126" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">ART runtime mapped</text>
+    <rect x="28" y="136" width="148" height="20" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="102" y="150" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">framework classes loaded</text>
+    <rect x="28" y="160" width="148" height="20" rx="4" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="102" y="174" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-label)">resources preloaded</text>
+
+    <path fill="none" d="M190 100 L268 76" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path fill="none" d="M190 146 L268 146" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <path fill="none" d="M190 168 L268 216" stroke="var(--dg-line)" stroke-width="1.5"/>
+    <rect x="196" y="106" width="62" height="20" rx="10" fill="var(--dg-fill-2)" stroke="var(--dg-accent)"/>
+    <text x="227" y="120" text-anchor="middle" font-family="var(--font-mono)" font-size="10" fill="var(--dg-accent)">fork</text>
+
+    <rect x="268" y="58" width="150" height="38" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="343" y="82" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">your app</text>
+    <rect x="268" y="127" width="150" height="38" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="343" y="151" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">another app</text>
+    <rect x="268" y="196" width="150" height="38" rx="6" fill="var(--dg-fill)" stroke="var(--dg-line)"/>
+    <text x="343" y="220" text-anchor="middle" font-family="var(--font-mono)" font-size="11" fill="var(--dg-label)">a third app</text>
+
+    <text x="440" y="76" font-family="var(--font-ui)" font-size="11" fill="var(--dg-ok)">INHERITED FREE</text>
+    <text x="440" y="93" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">runtime, framework classes,</text>
+    <text x="440" y="108" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">resources — shared pages,</text>
+    <text x="440" y="123" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">copy-on-write</text>
+    <text x="440" y="152" font-family="var(--font-ui)" font-size="11" fill="var(--dg-warn)">NOT INHERITED</text>
+    <text x="440" y="169" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">your static state: every</text>
+    <text x="440" y="184" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">fork starts your classes</text>
+    <text x="440" y="199" font-family="var(--font-ui)" font-size="11" fill="var(--dg-muted)">uninitialised</text>
+  </svg>
+</Diagram>
+
+### Where this goes next
+
+Chapter 5 turns this into a set of rules: what to save, where, and how to prove it. The next lesson asks a smaller question: if your process is disposable, who is in charge?
+
+## Why a release build breaks when debug works
+
+**You will:** make a class vanish from your app, prove it is missing, and bring it back with one line.
+**You need:** a project you can build. For step 1 you also need the Android SDK command-line tools: `apkanalyzer` lives in `<sdk>/cmdline-tools/latest/bin`.
+**Time:** about 20 minutes.
+**Built with:** compileSdk 36, AGP 8.13, Kotlin 2.3.
+
+### The problem you can see
+
+Add a class that nothing refers to by name, then load it using its name as a string. Loading code by its name as text is called **reflection**.
+
+```kotlin
+// Plugin.kt
+class Plugin {
+    fun greet(): String = "hello from the plugin"
+}
+
+// MainActivity.kt, anywhere that runs
+val plugin = Class.forName("dev.firstprinciples.android.Plugin")
+    .getDeclaredConstructor()
+    .newInstance()
+val greeting = plugin.javaClass.getMethod("greet").invoke(plugin) as String
+Log.d("Plugin", greeting)
+```
+
+Run the debug build. It logs the greeting. Now turn on code shrinking for the debug build type. Release builds usually have this on; doing it on debug means you do not need a signing key to see the problem.
+
+```kotlin
+// app/build.gradle.kts
+android {
+    buildTypes {
+        debug {
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+}
+```
+
+Run again.
+
+```
+java.lang.ClassNotFoundException: Didn't find class "dev.firstprinciples.android.Plugin" on path: DexPathList[[zip file "/data/app/.../base.apk"], ...]
+```
+
+The class is in your source. It compiled. It is not in the app.
+
+### What is actually happening
+
+When shrinking is on, a tool called **R8** runs as part of the build. It does two things you can see. It deletes code that nothing refers to, and it renames what is left to short names like `a.b`. Both make the app smaller and faster. The official guide is [Enable app optimization with R8](https://developer.android.com/topic/performance/app-optimization/enable-app-optimization).
+
+"Nothing refers to" is decided by following references from your code. A string is not a reference. R8 saw a class called `Plugin` that no code referred to, decided it was unused, and removed it. Your `Class.forName` then asked for a class that no longer exists.
+
+A **keep rule** is a line in `proguard-rules.pro` that tells R8 about something it cannot see. That is what every keep rule you have ever copied was doing.
+
+### Fixing it, step by step
+
+#### Step 1: prove the class is gone
+
+```bash
+apkanalyzer dex packages app/build/outputs/apk/debug/app-debug.apk | grep Plugin
+```
+
+**What you should see:** nothing. Turn `isMinifyEnabled` back off, rebuild, run the same command, and a line naming `dev.firstprinciples.android.Plugin` appears. Turn it on again for the next step.
+
+**Why:** `apkanalyzer` reads the APK itself, so it shows what shipped, not what your source tree says. [apkanalyzer](https://developer.android.com/tools/apkanalyzer) lists its commands.
+
+#### Step 2: add a keep rule
+
+```
+# app/proguard-rules.pro
+-keep class dev.firstprinciples.android.Plugin { *; }
+```
+
+Rebuild and run.
+
+**What you should see:** the greeting is logged again, and step 1's command now shows the class under its full name.
+
+**Why:** the rule tells R8 to keep this class and everything in it, and not to rename it. Keep rules this narrow. A rule like `-keep class dev.firstprinciples.** { *; }` switches R8 off for your whole app, which is the most common way to have shrinking "enabled" and get nothing from it. [Add keep rules](https://developer.android.com/topic/performance/app-optimization/add-keep-rules) has the patterns.
+
+### When it breaks
+
+**Release crashes with `ClassNotFoundException`, debug is fine, and the class is right there in your code.** R8 removed or renamed something reached only by reflection. Add a narrow keep rule, and keep `isMinifyEnabled = true` on a debug variant so this class of bug shows up on your desk (chapter 20 shows the variant).
+
+**JSON comes back as empty objects in release only.** Same cause, different shape: a JSON library that uses reflection lost its field names to renaming. Chapter 16 explains why the fix is a different library, not more keep rules.
+
+**Works on your device, broken for users from Play.** You installed an APK. Play builds device-specific pieces from your app bundle, and one piece is missing something. Chapter 20 covers bundles; the cheat-sheet has the command to reproduce what Play would install.
+
+### Try it yourself
+
+Before you run it: delete the keep rule and put `@Keep` (from `androidx.annotation`) on the `Plugin` class instead. Predict whether step 1's command shows `Plugin` with its original name.
+
+**Answer:** yes. [`@Keep`](https://developer.android.com/reference/androidx/annotation/Keep) is a keep rule attached to the class, and it prevents both removal and renaming. Second prediction: a class you *do* reference normally, with no rule and no annotation. Does it keep its name? No. It is kept because it is reachable, but renamed to something like `a.b`. That is why a release crash report is unreadable without the mapping file R8 writes at build time, which chapter 20 covers.
+
+### Words you met
+
+**Reflection**: loading a class or method by its name as text, which R8 cannot follow.
+
+**R8**: the build tool that removes unreferenced code and renames the rest when shrinking is on. [Enable app optimization with R8](https://developer.android.com/topic/performance/app-optimization/enable-app-optimization)
+
+**Keep rule**: a line telling R8 to preserve something it cannot see. [Add keep rules](https://developer.android.com/topic/performance/app-optimization/add-keep-rules)
+
+**`apkanalyzer`**: the SDK tool that lists what is really inside an APK. [apkanalyzer](https://developer.android.com/tools/apkanalyzer)
+
+<Callout kind="note" title="Go deeper (optional)">
+Your Kotlin does not run on the phone. The compiler produces JVM bytecode; a tool called D8 converts that into **DEX**, the instruction format the Android runtime executes, and packs it into `classes.dex` inside the APK. R8 is D8 plus the shrinking. Resources travel a separate path through a tool called AAPT2, which is why a missing `R.id` is a "resource linking" error and not a Kotlin one, and why `R.string.title` is an `int`: it is an index into the compiled resource table. [Android runtime and Dalvik](https://source.android.com/docs/core/runtime) describes the runtime; the cheat-sheet has a table of which build stage produces which error.
+</Callout>
+
+### Where this goes next
+
+The last core lesson puts the whole start of your app in order, with a number attached, and finds the library that made it slower.
